@@ -486,3 +486,131 @@ class Mitra:
         )
 
         return result_files
+
+
+# ---------------------------------------------------------------------------
+# Paper Table 2 leakage-profile simulators
+# ---------------------------------------------------------------------------
+
+_PAPER_SCHEME_PROFILES: dict[str, dict[str, Any]] = {
+    "B(O)": {"security_type": "Type I", "token_relation": "irrelevant", "qeq": "RSP", "rlen": True, "ulen": True, "ilen": True, "dlen": True, "fvol": True},
+    "Moneta": {"security_type": "Type I", "token_relation": "irrelevant", "qeq": "RSP", "rlen": True, "ulen": True, "ilen": True, "dlen": True, "fvol": True},
+    "Orion": {"security_type": "Type I", "token_relation": "irrelevant", "qeq": "RSP", "rlen": True, "ulen": False, "ilen": False, "dlen": False, "fvol": True},
+    "B(Sigma)": {"security_type": "Type II", "token_relation": "exactly same", "qeq": "token", "rlen": True, "ulen": True, "ilen": True, "dlen": True, "fvol": True},
+    "Fides": {"security_type": "Type II", "token_relation": "computationally same", "qeq": "token", "rlen": True, "ulen": True, "ilen": True, "dlen": True, "fvol": True},
+    "Aura": {"security_type": "Type II", "token_relation": "partially same", "qeq": "token", "rlen": True, "ulen": True, "ilen": True, "dlen": True, "fvol": True},
+    "Mitra": {"security_type": "Type II", "token_relation": "partially same", "qeq": "token", "rlen": True, "ulen": True, "ilen": True, "dlen": True, "fvol": True},
+    "2chFB": {"security_type": "Type II", "token_relation": "partially same", "qeq": "token", "rlen": False, "ulen": False, "ilen": False, "dlen": False, "fvol": True},
+    "Janus": {"security_type": "Type III", "token_relation": "partially same", "qeq": "token", "rlen": True, "ulen": True, "ilen": True, "dlen": True, "fvol": True},
+    "Janus++": {"security_type": "Type III", "token_relation": "partially same", "qeq": "token", "rlen": True, "ulen": True, "ilen": True, "dlen": True, "fvol": True},
+    "OSSE": {"security_type": "Type III", "token_relation": "partially same", "qeq": "token", "rlen": True, "ulen": True, "ilen": True, "dlen": True, "fvol": True},
+    "LLSE": {"security_type": "Type III", "token_relation": "partially same", "qeq": "token", "rlen": True, "ulen": True, "ilen": True, "dlen": True, "fvol": True},
+}
+
+
+class LeakageProfileSimulator:
+    """Leakage-profile descriptor for a representative paper scheme.
+
+    These classes describe leakage and token relations; only BSigma, Fides,
+    and Mitra above implement search/update operations.
+    """
+
+    name: str
+
+    def __init__(self) -> None:
+        self.metadata = dict(_PAPER_SCHEME_PROFILES[self.name])
+
+
+class BOLeakageProfile(LeakageProfileSimulator):
+    name = "B(O)"
+
+
+class MonetaLeakageProfile(LeakageProfileSimulator):
+    name = "Moneta"
+
+
+class OrionLeakageProfile(LeakageProfileSimulator):
+    name = "Orion"
+
+
+class BSigmaLeakageProfile(LeakageProfileSimulator):
+    name = "B(Sigma)"
+
+
+class FidesLeakageProfile(LeakageProfileSimulator):
+    name = "Fides"
+
+
+class AuraLeakageProfile(LeakageProfileSimulator):
+    name = "Aura"
+
+
+class MitraLeakageProfile(LeakageProfileSimulator):
+    name = "Mitra"
+
+
+class TwoChFBLeakageProfile(LeakageProfileSimulator):
+    name = "2chFB"
+
+
+class JanusLeakageProfile(LeakageProfileSimulator):
+    name = "Janus"
+
+
+class JanusPlusPlusLeakageProfile(LeakageProfileSimulator):
+    name = "Janus++"
+
+
+class OSSELeakageProfile(LeakageProfileSimulator):
+    name = "OSSE"
+
+
+class LLSELeakageProfile(LeakageProfileSimulator):
+    name = "LLSE"
+
+
+def generate_table2() -> str:
+    """Print and return the paper's Table 2 leakage cells as Markdown."""
+    columns = ("Scheme", "qeq", "rlen", "ulen", "ilen", "dlen", "fvol", "Security type", "Token relation")
+    rows: list[list[str]] = []
+    for name, metadata in _PAPER_SCHEME_PROFILES.items():
+        rows.append([
+            name,
+            metadata["qeq"],
+            *("yes" if metadata[key] else "no" for key in ("rlen", "ulen", "ilen", "dlen", "fvol")),
+            metadata["security_type"],
+            metadata["token_relation"],
+        ])
+    table = "| " + " | ".join(columns) + " |\n"
+    table += "| " + " | ".join("---" for _ in columns) + " |\n"
+    table += "".join("| " + " | ".join(row) + " |\n" for row in rows)
+    print(table, end="")
+    return table
+
+
+def reproduce_fig2() -> dict[str, Any]:
+    """Reproduce the Figure 2 leakage extraction on a deterministic toy index."""
+    scheme = BSigma(key=b"fig2-demo-key")
+    file_volumes = {1: 2, 2: 3, 3: 2}
+    scheme.add("kw", 1)
+    scheme.add("kw", 2)
+    scheme.add("kw", 3)
+    scheme.delete("kw", 2)
+    scheme.search("kw")
+    entry = scheme.transcript.entries[-1]
+    ulen = len(entry.returned_index_entries)
+    rlen = len(entry.returned_file_ids)
+    insertions, deletions = scheme.transcript.compute_a_and_d()
+    fvol = collections.Counter(file_volumes[file_id] for file_id in entry.returned_file_ids)
+    values = {
+        "ulen": ulen,
+        "rlen": rlen,
+        "insertions": insertions,
+        "deletions": deletions,
+        "fvol": dict(sorted(fvol.items())),
+    }
+    print(
+        f"Fig. 2 toy transcript: ulen={ulen}, rlen={rlen}, "
+        f"a={insertions}, d={deletions}, fvol={dict(sorted(fvol.items()))}"
+    )
+    return values

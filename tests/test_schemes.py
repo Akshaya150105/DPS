@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from schemes import make_token
+from schemes import generate_table2, make_token, reproduce_fig2
 
 
 def make_rng(seed: int = 42) -> np.random.Generator:
@@ -80,6 +80,29 @@ class TestMakeTokenInvalidMode:
             make_token("kw0", "T3", make_rng())
         with pytest.raises(ValueError, match="Expected 'T1' or 'T2'"):
             make_token("kw0", "invalid", make_rng())
+
+
+class TestPaperReproductions:
+    def test_table2_contains_paper_leakage_exceptions(self, capsys) -> None:
+        table = generate_table2()
+        capsys.readouterr()
+
+        assert "| Orion | RSP | yes | no | no | no | yes | Type I | irrelevant |" in table
+        assert "| 2chFB | token | no | no | no | no | yes | Type II | partially same |" in table
+        assert table.count("| Type III |") == 4
+
+    def test_fig2_exposes_lengths_and_forward_volume(self, capsys) -> None:
+        values = reproduce_fig2()
+        output = capsys.readouterr().out
+
+        assert values == {
+            "ulen": 4,
+            "rlen": 2,
+            "insertions": 3,
+            "deletions": 1,
+            "fvol": {2: 2},
+        }
+        assert "fvol={2: 2}" in output
 
 
 # ---------------------------------------------------------------------------
@@ -243,4 +266,3 @@ class TestMitra:
         scheme.search("cipher")
         tok_diff = scheme.transcript.tokens[-1]
         assert tok_diff.keyword_component != tok1.keyword_component
-

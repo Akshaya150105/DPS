@@ -10,7 +10,7 @@ computes document frequencies, selects the top-K keywords, and exports:
 
 import argparse
 import collections
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import email
 import email.message
 import email.utils
@@ -524,11 +524,14 @@ def preprocess_dataset(
     stem: bool = False,
     name: Optional[str] = None,
     out_dir: str = "datasets/processed",
+    start: str | date | None = None,
+    end: str | date | None = None,
 ) -> dict[str, Any]:
     """Parse raw messages, select top-K keywords, and save processed artifacts.
 
     Artifacts saved under `out_dir`:
-        - `{name}.pkl`: (docs, vocab, name)
+        - `{name}.pkl`: (docs, vocab, name), preserving the legacy tuple contract
+        - `{name}_intervals.json`: month-index-by-doc-id
         - `{name}_index.json`: keyword -> list of doc_ids
         - `{name}_metadata.json`: counts and date range
         - `{name}_meta.json`: alias for metadata
@@ -540,6 +543,8 @@ def preprocess_dataset(
         stem:    Whether to apply Porter stemming.
         name:    Dataset identifier (defaults to source).
         out_dir: Destination folder for output files.
+        start:   Inclusive first date; source-specific paper defaults apply when omitted.
+        end:     Inclusive last date; source-specific paper defaults apply when omitted.
 
     Returns:
         Metadata dict summarizing document counts, vocabulary, and date range.
@@ -555,6 +560,17 @@ def preprocess_dataset(
     else:
         raise ValueError(f"Unknown source: {source}. Choose 'enron' or 'lucene'.")
 
+    if source_lower == "enron":
+        start = _coerce_date(start) if start is not None else date(1999, 12, 1)
+        end = _coerce_date(end) if end is not None else date(2001, 2, 27)
+    else:
+        if start is None or end is None:
+            print("Lucene paper range default uses 2006-11-30; the paper omits the year for its end date.")
+        start = _coerce_date(start) if start is not None else date(2006, 6, 1)
+        end = _coerce_date(end) if end is not None else date(2006, 11, 30)
+    if start > end:
+        raise ValueError(f"start date {start} must not be after end date {end}.")
+
     # Print summary of parsing
     print(f"Parsed {len(raw_msgs)} valid messages from '{path}'.")
     print(f"Skipped {skipped_bad_dates} messages with bad dates.")
@@ -567,6 +583,8 @@ def preprocess_dataset(
     doc_freq: dict[str, int] = collections.defaultdict(int)
 
     for dt, body in raw_msgs:
+        if not start <= dt.date() <= end:
+            continue
         tokens = tokenize_text(body, stem=stem)
         unique_tokens = set(tokens)
         doc_entries.append((dt, unique_tokens))
@@ -586,6 +604,11 @@ def preprocess_dataset(
     for doc_id, (dt, unique_tokens) in enumerate(doc_entries):
         filtered_keywords = frozenset(tok for tok in unique_tokens if tok in vocab_set)
         docs.append(Document(doc_id=doc_id, keywords=filtered_keywords, timestamp=dt))
+
+    interval_indices = {
+        doc.doc_id: _month_interval_index(doc.timestamp.date(), start)
+        for doc in docs
+    }
 
     # 5. Build keyword to document IDs inverted index
     kw_to_docs: dict[str, list[int]] = {kw: [] for kw in vocab}
@@ -619,6 +642,10 @@ def preprocess_dataset(
         },
         "start_date": min_date.isoformat() if min_date else None,
         "end_date": max_date.isoformat() if max_date else None,
+        "interval_frequency": "month",
+        "interval_start": start.isoformat(),
+        "interval_end": end.isoformat(),
+        "interval_index": {str(doc_id): index for doc_id, index in interval_indices.items()},
     }
 
     # 8. Save artifacts under out_dir
@@ -627,6 +654,10 @@ def preprocess_dataset(
     pkl_path = os.path.join(out_dir, f"{name}.pkl")
     with open(pkl_path, "wb") as f:
         pickle.dump((docs, vocab, name), f)
+
+    intervals_path = os.path.join(out_dir, f"{name}_intervals.json")
+    with open(intervals_path, "w", encoding="utf-8") as f:
+        json.dump({str(doc_id): index for doc_id, index in interval_indices.items()}, f, indent=2)
 
     index_path = os.path.join(out_dir, f"{name}_index.json")
     with open(index_path, "w", encoding="utf-8") as f:
@@ -642,6 +673,42 @@ def preprocess_dataset(
         json.dump(metadata, f, indent=2)
 
     return metadata
+
+
+def _coerce_date(value: str | date) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Date must use YYYY-MM-DD format, got {value!r}.") from exc
+
+
+def _month_interval_index(value: date, start: date) -> int:
+    """Return a zero-based calendar-month offset from the configured start."""
+    return (value.year - start.year) * 12 + value.month - start.month
+
+
+def split_into_intervals(
+    docs: list[Document],
+    start: str | date,
+    end: str | date,
+    freq: str = "month",
+) -> tuple[list[Document], dict[int, int]]:
+    """Filter documents to an inclusive date range and index months from start."""
+    if freq.strip().lower() != "month":
+        raise ValueError("Only monthly intervals are supported.")
+    start_date = _coerce_date(start)
+    end_date = _coerce_date(end)
+    if start_date > end_date:
+        raise ValueError("start must not be after end.")
+    filtered = [doc for doc in docs if start_date <= doc.timestamp.date() <= end_date]
+    return filtered, {
+        doc.doc_id: _month_interval_index(doc.timestamp.date(), start_date)
+        for doc in filtered
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +753,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         default=None,
         help="Dataset name (defaults to --source).",
     )
+    parser.add_argument("--start", default=None, help="Inclusive start date (YYYY-MM-DD); uses paper range by source if omitted.")
+    parser.add_argument("--end", default=None, help="Inclusive end date (YYYY-MM-DD); uses paper range by source if omitted.")
 
     args = parser.parse_args(argv)
 
@@ -696,6 +765,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         stem=args.stem,
         name=args.name,
         out_dir=args.out_dir,
+        start=args.start,
+        end=args.end,
     )
 
 

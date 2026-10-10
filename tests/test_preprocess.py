@@ -196,9 +196,12 @@ class TestEnronPreprocessing:
         assert index_path.exists()
         assert meta_path.exists()
 
-        # Load and verify pickle: (docs, vocab, name)
+        # Load and verify the stable pickle contract: (docs, vocab, name)
         with open(pkl_path, "rb") as f:
             docs, vocab, name = pickle.load(f)
+        with open(out_dir / "enron_intervals.json", "r", encoding="utf-8") as f:
+            interval_index = json.load(f)
+        assert interval_index == {str(doc.doc_id): 13 for doc in docs}
 
         assert name == "enron"
         assert len(docs) == 3
@@ -285,6 +288,8 @@ class TestLucenePreprocessing:
             k=500,
             stem=False,
             out_dir=str(out_dir),
+            start="2006-05-01",
+            end="2006-05-31",
         )
 
         captured = capsys.readouterr()
@@ -297,10 +302,31 @@ class TestLucenePreprocessing:
         assert pkl_path.exists()
         with open(pkl_path, "rb") as f:
             docs, vocab, name = pickle.load(f)
+        with open(out_dir / "lucene_intervals.json", "r", encoding="utf-8") as f:
+            interval_index = json.load(f)
 
         assert name == "lucene"
         assert len(docs) == 2
         assert "optimization" in vocab or "index" in vocab
+        assert interval_index == {str(doc.doc_id): 0 for doc in docs}
+
+    def test_monthly_interval_split_filters_and_indexes_documents(self) -> None:
+        from datetime import date
+
+        docs = [
+            Document(doc_id=0, keywords=frozenset({"a"}), timestamp=preprocess.parse_date("Wed, 10 Jan 2001 09:00:00 -0600")),
+            Document(doc_id=1, keywords=frozenset({"b"}), timestamp=preprocess.parse_date("Thu, 15 Feb 2001 09:00:00 -0600")),
+            Document(doc_id=2, keywords=frozenset({"c"}), timestamp=preprocess.parse_date("Fri, 02 Mar 2001 09:00:00 -0600")),
+        ]
+
+        selected, interval_index = preprocess.split_into_intervals(
+            docs,
+            start=date(2001, 1, 1),
+            end=date(2001, 2, 28),
+        )
+
+        assert [doc.doc_id for doc in selected] == [0, 1]
+        assert interval_index == {0: 0, 1: 1}
 
 
 # ---------------------------------------------------------------------------

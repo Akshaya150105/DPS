@@ -17,7 +17,13 @@ import run_experiments
 # ---------------------------------------------------------------------------
 
 class TestRunOne:
-    @pytest.mark.parametrize("attack", ["fma", "via", "pvia", "lvia-k", "lvia-s", "no_update"])
+    @pytest.mark.parametrize(
+        "attack",
+        [
+            "fma", "via", "pvia", "lvia-k", "lvia-s", "no_update",
+            "no-update-pvia", "no-update-lvia",
+        ],
+    )
     def test_run_one_synthetic_all_attacks(self, attack: str, tmp_path: pathlib.Path) -> None:
         """run_one must execute all supported attacks cleanly on the synthetic dataset."""
         csv_file = tmp_path / "results.csv"
@@ -223,6 +229,7 @@ class TestPaperFigureYAMLs:
         ("grids/lvia_k_vs_s.yaml", "LVIA-K vs LVIA-S", {"attack"}),
         ("grids/lvia_s_vs_tau.yaml", "LVIA-S vs tau", {"tau"}),
         ("grids/lvia_s_vs_eta.yaml", "LVIA-S vs eta", {"eta"}),
+        ("grids/no_update_variants.yaml", "No-update variants", {"attack", "alpha"}),
     ]
 
     @pytest.mark.parametrize("filepath, preset_name, varied_keys", EXPECTED_GRIDS)
@@ -253,7 +260,7 @@ class TestPaperFigureYAMLs:
             assert len(val) >= 2 or k == "attack", f"{k} should have multiple values in {filepath}"
 
     def test_yaml_dry_run_all_grids(self) -> None:
-        """Dry-run on all 9 YAML grids must succeed without error."""
+        """Dry-run on all YAML grids must succeed without error."""
         for filepath, _, _ in self.EXPECTED_GRIDS:
             runs = run_experiments.run_grid(
                 grid=filepath,
@@ -280,3 +287,25 @@ class TestCLI:
         captured = capsys.readouterr()
         assert "[DRY-RUN]" in captured.out
         assert "Total runs:" in captured.out
+
+    def test_cli_single_run_config_file(self, monkeypatch, tmp_path: pathlib.Path) -> None:
+        config_file = tmp_path / "single.yaml"
+        csv_file = tmp_path / "configured.csv"
+        config_file.write_text(
+            "dataset: synthetic\nattack: fma\ntau: 2\nlambda_queries: 20\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiments.py",
+                "--config",
+                str(config_file),
+                "--csv-path",
+                str(csv_file),
+            ],
+        )
+
+        run_experiments.main()
+
+        assert csv_file.exists()

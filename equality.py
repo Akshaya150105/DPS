@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 import leakage
 from types_ import LeakageRecord
@@ -79,6 +80,7 @@ def build_equality(
     records: list[LeakageRecord],
     mode: str,
     delta: float = 0.6,
+    forward_check: Callable[[Any, Any], bool] | None = None,
 ) -> EqualityResult:
     """Group search queries that are believed to be for the same keyword.
 
@@ -96,21 +98,30 @@ def build_equality(
         intervals are compared.  All such linked pairs are fed into a
         Union-Find to produce transitive groups.
 
+    ``exact`` groups equal token values, ``partial`` groups tokens sharing
+    their first component, and ``computational`` invokes
+    ``forward_check(newer_token, older_token)`` on chronological token pairs.
+
     Args:
         records: List of :class:`~types_.LeakageRecord` objects (any order).
-        mode:    ``'T1'`` or ``'T2'`` (case-insensitive).
+        mode:    ``'T1'``, ``'T2'``, ``'exact'``, ``'partial'``, or ``'computational'``.
         delta:   RSP threshold for T2 linking (default 0.6, ignored in T1).
+        forward_check: Token-chain verifier required by computational mode.
 
     Returns:
         An :class:`EqualityResult` with ``groups``, ``group_of``, and
         ``linked_pairs`` populated.
 
     Raises:
-        ValueError: If *mode* is not ``'T1'`` or ``'T2'``.
+        ValueError: If the mode is unknown or computational callback is missing.
     """
     mode_upper = mode.strip().upper()
-    if mode_upper not in ("T1", "T2"):
-        raise ValueError(f"Unknown mode {mode!r}. Expected 'T1' or 'T2'.")
+    if mode_upper not in ("T1", "T2", "EXACT", "PARTIAL", "COMPUTATIONAL"):
+        raise ValueError(
+            f"Unknown mode {mode!r}. Expected T1, T2, exact, partial, or computational."
+        )
+    if mode_upper == "COMPUTATIONAL" and forward_check is None:
+        raise ValueError("computational equality requires a forward_check(newer, older) callback.")
 
     uf = UnionFind()
     # Seed every query_id as its own set.
@@ -119,10 +130,46 @@ def build_equality(
 
     if mode_upper == "T1":
         _link_t1(records, uf)
-    else:
+    elif mode_upper == "T2":
         _link_t2(records, uf, delta)
+    elif mode_upper == "EXACT":
+        _link_relation(records, uf, lambda old, new: old == new)
+    elif mode_upper == "PARTIAL":
+        _link_relation(
+            records, uf,
+            lambda old, new: _partial_component(old) == _partial_component(new),
+        )
+    else:
+        assert forward_check is not None
+        _link_relation(records, uf, lambda old, new: forward_check(new, old))
 
     return _build_result(records, uf)
+
+
+def _partial_component(token: Any) -> Any:
+    """Extract a token's stable first component (for partial token relations)."""
+    if hasattr(token, "keyword_component"):
+        return token.keyword_component
+    if isinstance(token, (tuple, list)) and token:
+        return token[0]
+    text = str(token)
+    for delimiter in ("|", ":", ","):
+        if delimiter in text:
+            return text.split(delimiter, 1)[0]
+    return text
+
+
+def _link_relation(
+    records: list[LeakageRecord],
+    uf: UnionFind,
+    relation: Callable[[Any, Any], bool],
+) -> None:
+    """Union chronological query pairs satisfying a token relation."""
+    ordered = sorted(records, key=lambda record: (record.timestamp, record.query_id))
+    for index, older in enumerate(ordered):
+        for newer in ordered[index + 1:]:
+            if relation(older.token, newer.token):
+                uf.union(older.query_id, newer.query_id)
 
 
 # ---------------------------------------------------------------------------

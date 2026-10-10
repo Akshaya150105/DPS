@@ -1,0 +1,22 @@
+# Compare full-snapshot, partial-snapshot, and distribution-based Section 6.3 variants.
+dataset:
+  - synthetic
+attack:
+  - no_update
+  - no-update-pvia
+  - no-update-lvia
+equality:
+  - T1
+tau:
+  - 3
+lambda:
+  - 40
+gamma:
+  - 0.0
+alpha:
+  - 0.5
+  - 0.8
+eta:
+  - 0.5
+noise:
+  - 0.0

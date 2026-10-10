@@ -9,7 +9,7 @@ import attacks.no_update as no_update
 from config import Config
 from equality import build_equality
 from evaluate import accuracy
-from simulator import make_aux_pre_snapshot, simulate
+from simulator import make_aux_data_dist, make_aux_pre_snapshot, simulate
 from synthetic import VOCAB, make_synthetic
 from types_ import Aux, LeakageRecord
 
@@ -131,3 +131,29 @@ class TestNoUpdateFallback:
         """When mu0 = 0, all queries have timestamp >= mu0 and attack executes cleanly."""
         preds, _, records = _run_no_update(seed=42, lam=50.0, mu0=0)
         assert set(preds.keys()) == {r.query_id for r in records}
+
+
+class TestNoUpdateVariants:
+    def test_pvia_variant_returns_all_queries_and_validates_alpha(self) -> None:
+        docs = make_synthetic(seed=12)
+        records, _, _ = simulate(docs, Config(seed=12, tau=2, lambda_queries=20))
+        equality = build_equality(records, "T1")
+        aux = Aux(pre_snapshot=make_aux_pre_snapshot(docs, mu0=20))
+
+        predictions = no_update.no_update_pvia(records, aux, equality, alpha=0.8, mu0=20)
+
+        assert set(predictions) == {record.query_id for record in records}
+        with pytest.raises(ValueError, match="alpha"):
+            no_update.no_update_pvia(records, aux, equality, alpha=1.0)
+
+    def test_lvia_variant_uses_interval_distribution(self) -> None:
+        records = [
+            LeakageRecord(0, "a", 0, 0, 2, 2),
+            LeakageRecord(1, "b", 1, 1, 4, 4),
+        ]
+        equality = build_equality(records, "exact")
+        aux = Aux(data_dist={0: {"first": 2}, 1: {"second": 4}})
+
+        predictions = no_update.no_update_lvia(records, aux, equality, theta=0)
+
+        assert predictions == {0: "first", 1: "second"}

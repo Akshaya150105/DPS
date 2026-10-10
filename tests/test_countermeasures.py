@@ -130,7 +130,16 @@ class TestFileVolumePadding:
 
         assert estimate["email_count"] == 30_204
         assert estimate["keyword_count"] == 73_991
+        assert estimate["paper_reported_overhead_factor"] == pytest.approx(107.0)
+        assert estimate["paper_reported_overhead"] == "about 107x storage"
         assert estimate["worst_case_posting_entries"] == 2_234_824_164
+
+    def test_does_not_apply_paper_ratio_to_custom_corpus_sizes(self) -> None:
+        estimate = paper_section_8_estimate(email_count=10, keyword_count=20)
+
+        assert estimate["paper_reported_overhead_factor"] is None
+        assert estimate["paper_reported_overhead"] is None
+        assert estimate["worst_case_posting_entries"] == 200
 
 
 class TestOramEqualityHiding:

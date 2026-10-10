@@ -103,6 +103,26 @@ class TestAlgebraIdentitiesOnRandomLogs:
                == leakage.ulen(events, "kw", mu)
 
 
+def test_backward_privacy_leakages_recover_their_documented_values() -> None:
+    """Type I/II reveal (u,n); Type III reveals (n,d), each deriving a and u."""
+    rng = make_rng(909)
+    for _ in range(20):
+        events, true_a, true_d = build_random_log(rng)
+        mu = max(event.mu for event in events)
+        observed_u = leakage.ulen(events, "kw", mu)
+        observed_n = leakage.rlen(events, "kw", mu)
+        observed_d = leakage.dlen(events, "kw", mu)
+
+        type_i_leakage = (observed_u, observed_n)
+        type_ii_leakage = (observed_n, observed_u)
+        type_iii_leakage = (observed_n, observed_d)
+        type_i = leakage.derive_insert_delete(*type_i_leakage)
+        type_ii = leakage.derive_insert_delete(type_ii_leakage[1], type_ii_leakage[0])
+        type_iii = leakage.derive_from_n_d(*type_iii_leakage)
+        assert type_i == type_ii == (true_a, true_d)
+        assert type_iii == (true_a, true_a + true_d)
+
+
 # ---------------------------------------------------------------------------
 # 2. derive_insert_delete: (a, d) from (u, n)
 # ---------------------------------------------------------------------------

@@ -1,28 +1,25 @@
-"""Attack without Update Knowledge (Section 6.3).
-
-Reference: Section 6.3 of 'Leakage-Abuse Attacks Against Forward and
-Backward Private Searchable Symmetric Encryption' (CCS 2023).
-
-Models an adversary who possesses only historical database knowledge before
-time mu0 (aux.pre_snapshot) and has no access to subsequent update logs:
-  1. For each target query q, find q~: the linked query (in q's equality
-     group) occurring closest after mu0. If no such query exists, q~ = q.
-  2. Compute insert length of q~: a_q~ = (ulen + rlen) / 2.
-  3. Candidate keywords are {w : a_q~ >= L[w]}, where L[w] is the number of
-     snapshot documents containing w.
-  4. Narrow down candidates by dropping any w for which a volume in
-     fvol_q~ is not in V[w] (where V[w] is the set of volumes of snapshot
-     documents containing w).
-  5. If exactly one candidate remains, assign it to q; otherwise None.
-"""
+"""Attacks without update knowledge (Section 6.3)."""
 
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Any
+from collections import Counter, defaultdict
 
 from equality import EqualityResult
 from types_ import Aux, LeakageRecord
+
+
+def _target_query(
+    record: LeakageRecord,
+    records_by_id: dict[int, LeakageRecord],
+    equality: EqualityResult,
+    mu0: int,
+) -> LeakageRecord:
+    """Return the earliest equality-linked query at or after the cutoff."""
+    group_id = equality.group_of.get(record.query_id)
+    group_ids = equality.groups.get(group_id, [record.query_id])
+    linked = [records_by_id[qid] for qid in group_ids if qid in records_by_id]
+    after_cutoff = [item for item in linked if item.timestamp >= mu0]
+    return min(after_cutoff, key=lambda item: (item.timestamp, item.query_id)) if after_cutoff else record
 
 
 def run(
@@ -31,91 +28,129 @@ def run(
     equality: EqualityResult,
     mu0: int = 0,
 ) -> dict[int, str | None]:
-    """Run the attack without update knowledge.
+    """Run the full-snapshot no-update attack from paper Section 6.3.
 
-    Args:
-        records:  List of :class:`~types_.LeakageRecord` objects observed across
-                  the simulation.
-        aux:      Adversary auxiliary knowledge. Must contain ``pre_snapshot``
-                  (list of :class:`~types_.Document` objects prior to time mu0).
-        equality: :class:`~equality.EqualityResult` containing query groupings.
-        mu0:      Logical timestamp cutoff for the pre-snapshot. If None,
-                  attempts to read ``aux.mu0`` or defaults to 0.
-
-    Returns:
-        Dict mapping ``query_id -> predicted keyword`` (or ``None`` when
-        unresolved). Every query_id in records is present in the returned dict.
+    The attacker uses only ``aux.pre_snapshot`` to calculate keyword document
+    frequencies and document-volume sets. Ambiguous candidates remain None.
     """
     if mu0 is None:
         mu0 = getattr(aux, "mu0", 0)
-
-    # Initialise every query in records to unresolved (None).
-    predictions: dict[int, str | None] = {rec.query_id: None for rec in records}
-
+    predictions: dict[int, str | None] = {record.query_id: None for record in records}
     if not records or aux.pre_snapshot is None:
         return predictions
 
-    rec_map: dict[int, LeakageRecord] = {r.query_id: r for r in records}
-    snapshot_docs = aux.pre_snapshot
-
-    # -----------------------------------------------------------------------
-    # Step 1: Build L[w] and V[w] from snapshot documents
-    # -----------------------------------------------------------------------
-    # L[w]: number of snapshot documents containing w
-    # V[w]: set of volumes of snapshot documents containing w
-    L: dict[str, int] = defaultdict(int)
-    V: dict[str, set[int]] = defaultdict(set)
-    vocab_set: set[str] = set()
-
-    for doc in snapshot_docs:
-        kws = doc.keywords if hasattr(doc, "keywords") else set()
-        vol = len(kws)
-        for w in kws:
-            L[w] += 1
-            V[w].add(vol)
-            vocab_set.add(w)
-
-    vocab = sorted(vocab_set)
-    if not vocab:
+    counts: Counter[str] = Counter()
+    volumes_by_keyword: dict[str, set[int]] = defaultdict(set)
+    for document in aux.pre_snapshot:
+        volume = len(document.keywords)
+        for keyword in document.keywords:
+            counts[keyword] += 1
+            volumes_by_keyword[keyword].add(volume)
+    if not counts:
         return predictions
 
-    # -----------------------------------------------------------------------
-    # Step 2: For each target query q, find q~ (closest after mu0) and filter
-    # -----------------------------------------------------------------------
-    for q in records:
-        gid = equality.group_of.get(q.query_id)
-        if gid is not None and gid in equality.groups:
-            linked_recs = [rec_map[qid] for qid in equality.groups[gid] if qid in rec_map]
-        else:
-            linked_recs = [q]
+    records_by_id = {record.query_id: record for record in records}
+    for record in records:
+        target = _target_query(record, records_by_id, equality, mu0)
+        insert_length = (target.ulen + target.rlen) / 2
+        candidates = [
+            keyword
+            for keyword, count in counts.items()
+            if insert_length >= count
+            and all(
+                count_for_volume <= 0 or volume in volumes_by_keyword[keyword]
+                for volume, count_for_volume in target.fvol.items()
+            )
+        ]
+        if len(candidates) == 1:
+            predictions[record.query_id] = candidates[0]
+    return predictions
 
-        # Linked query closest after mu0 (if none, use q)
-        after_mu0 = [r for r in linked_recs if r.timestamp >= mu0]
-        if after_mu0:
-            q_tilde = min(after_mu0, key=lambda r: (r.timestamp - mu0, r.query_id))
-        else:
-            q_tilde = q
 
-        a_q_tilde = int(round((q_tilde.ulen + q_tilde.rlen) / 2.0))
+def no_update_pvia(
+    records: list[LeakageRecord],
+    aux: Aux,
+    equality: EqualityResult,
+    alpha: float,
+    mu0: int = 0,
+) -> dict[int, str | None]:
+    """Partial-snapshot no-update variant using volume-overlap ranking.
 
-        # Candidates are {w : a_q~ >= L[w]}
-        candidates = [w for w in vocab if a_q_tilde >= L[w]]
+    ``alpha`` scales the known snapshot frequency bound. A unique maximum
+    multiset overlap is assigned; ties remain unresolved.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be in the open interval (0, 1).")
+    predictions: dict[int, str | None] = {record.query_id: None for record in records}
+    if not records or aux.pre_snapshot is None:
+        return predictions
 
-        # Drop any w for which a volume in fvol_q~ is not in V[w]
-        filtered: list[str] = []
-        for w in candidates:
-            missing = False
-            for vol, cnt in q_tilde.fvol.items():
-                if cnt > 0 and vol not in V[w]:
-                    missing = True
-                    break
-            if not missing:
-                filtered.append(w)
+    counts: Counter[str] = Counter()
+    volumes_by_keyword: dict[str, Counter[int]] = defaultdict(Counter)
+    for document in aux.pre_snapshot:
+        volume = len(document.keywords)
+        for keyword in document.keywords:
+            counts[keyword] += 1
+            volumes_by_keyword[keyword][volume] += 1
+    if not counts:
+        return predictions
 
-        # If exactly one candidate remains assign it to q, otherwise None
-        if len(filtered) == 1:
-            predictions[q.query_id] = filtered[0]
-        else:
-            predictions[q.query_id] = None
+    records_by_id = {record.query_id: record for record in records}
+    for record in records:
+        target = _target_query(record, records_by_id, equality, mu0)
+        insert_length = (target.ulen + target.rlen) / 2
+        candidates = [
+            keyword for keyword, count in counts.items()
+            if alpha * count <= insert_length
+        ]
+        if not candidates:
+            continue
 
+        def score(keyword: str) -> int:
+            return sum(
+                min(max(observed, 0), volumes_by_keyword[keyword][volume])
+                for volume, observed in target.fvol.items()
+            )
+
+        scores = {keyword: score(keyword) for keyword in candidates}
+        best_score = max(scores.values())
+        winners = [keyword for keyword, value in scores.items() if value == best_score]
+        if len(winners) == 1:
+            predictions[record.query_id] = winners[0]
+    return predictions
+
+
+def no_update_lvia(
+    records: list[LeakageRecord],
+    aux: Aux,
+    equality: EqualityResult,
+    *,
+    theta: float = 0.15,
+    mu0: int = 0,
+) -> dict[int, str | None]:
+    """No-update LVIA using the per-interval auxiliary keyword distribution."""
+    if theta < 0.0:
+        raise ValueError("theta must be non-negative.")
+    predictions: dict[int, str | None] = {record.query_id: None for record in records}
+    if not records or not aux.data_dist:
+        return predictions
+
+    records_by_id = {record.query_id: record for record in records}
+    for record in records:
+        target = _target_query(record, records_by_id, equality, mu0)
+        distribution = aux.data_dist.get(target.interval, {})
+        if not distribution:
+            continue
+        insert_length = (target.ulen + target.rlen) / 2
+        window = theta * max(1.0, insert_length) if theta < 1.0 else theta
+        scores = {
+            keyword: abs(count - insert_length)
+            for keyword, count in distribution.items()
+            if abs(count - insert_length) <= window
+        }
+        if scores:
+            best_distance = min(scores.values())
+            winners = [keyword for keyword, distance in scores.items() if distance == best_distance]
+            if len(winners) == 1:
+                predictions[record.query_id] = winners[0]
     return predictions

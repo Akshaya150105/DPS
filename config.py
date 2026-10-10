@@ -1,6 +1,8 @@
 """Global experiment configuration."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields
+import pathlib
+from typing import Any
 
 
 @dataclass
@@ -33,3 +35,24 @@ class Config:
     equality: str = "T1"
     delta: float = 0.6
     attack: str = "fma"
+
+
+def load_config(path: str | pathlib.Path) -> Config:
+    """Load YAML configuration, retaining dataclass defaults for missing fields."""
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ImportError("PyYAML is required to load configuration files.") from exc
+
+    config_path = pathlib.Path(path)
+    with config_path.open("r", encoding="utf-8") as stream:
+        values: Any = yaml.safe_load(stream)
+    if values is None:
+        values = {}
+    if not isinstance(values, dict):
+        raise ValueError(f"Configuration file must contain a YAML mapping: '{config_path}'.")
+    valid_fields = {item.name for item in fields(Config)}
+    unknown = sorted(set(values) - valid_fields)
+    if unknown:
+        raise ValueError(f"Unknown configuration field(s) in '{config_path}': {', '.join(unknown)}.")
+    return Config(**values)

@@ -18,6 +18,7 @@ from types_ import Document, LeakageRecord
 
 PAPER_SECTION_8_EMAILS = 30_204
 PAPER_SECTION_8_KEYWORDS = 73_991
+PAPER_SECTION_8_OVERHEAD_FACTOR = 107.0
 
 
 def _ceil_to_bucket(value: int, bucket: int) -> int:
@@ -114,23 +115,33 @@ def overhead_report(dataset: Iterable[Document]) -> dict[str, int | float | None
 def paper_section_8_estimate(
     email_count: int = PAPER_SECTION_8_EMAILS,
     keyword_count: int = PAPER_SECTION_8_KEYWORDS,
-) -> dict[str, int | float]:
-    """Return the corpus-wide worst-case posting-entry estimate for Section 8.
+) -> dict[str, int | float | str | None]:
+    """Return the paper's Section 8 Enron estimate and a distinct slot bound.
 
-    Under full volume padding every email is provisioned for every keyword, so
-    the conservative upper bound is ``email_count * keyword_count`` entries.
-    This reproduces the paper's stated quadratic-index worst case for the
-    cited 30,204-email / 73,991-keyword corpus; it is not the measured count of
-    actual postings (which requires per-document keyword frequencies).
+    Section 8 reports about 107x storage overhead for the Enron corpus with
+    30,204 emails and 73,991 keywords. Those two corpus totals are not enough
+    to derive that ratio independently: the paper's padding estimate also
+    depends on posting-list and maximum file-volume statistics. The reported
+    factor is therefore preserved as a paper-reported estimate, not presented
+    as a value computed from just the two totals. Separately, the function
+    returns ``email_count * keyword_count`` as a simple all-email/all-keyword
+    posting-slot bound; it is not the measured padded storage or the derivation
+    of the paper's 107x ratio.
     """
     if isinstance(email_count, bool) or not isinstance(email_count, int) or email_count < 0:
         raise ValueError("email_count must be a non-negative integer.")
     if isinstance(keyword_count, bool) or not isinstance(keyword_count, int) or keyword_count < 0:
         raise ValueError("keyword_count must be a non-negative integer.")
     entries = email_count * keyword_count
+    is_paper_corpus = (
+        email_count == PAPER_SECTION_8_EMAILS
+        and keyword_count == PAPER_SECTION_8_KEYWORDS
+    )
     return {
         "email_count": email_count,
         "keyword_count": keyword_count,
+        "paper_reported_overhead_factor": PAPER_SECTION_8_OVERHEAD_FACTOR if is_paper_corpus else None,
+        "paper_reported_overhead": "about 107x storage" if is_paper_corpus else None,
         "worst_case_posting_entries": entries,
         "worst_case_entries_per_email": keyword_count,
     }

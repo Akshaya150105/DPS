@@ -1,11 +1,15 @@
 """Tests for equality.py: UnionFind, build_equality (T1/T2), equality_quality."""
 
+from collections import Counter
+
 import pytest
 
 from config import Config
 from equality import EqualityResult, UnionFind, build_equality, equality_quality
+from schemes import Fides, FidesToken, Mitra
 from simulator import simulate
 from synthetic import make_synthetic
+from types_ import LeakageRecord
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +237,69 @@ class TestBuildEqualityT2:
         result_high = build_equality(records, mode="T2", delta=0.95)
         # Fewer groups means more things were merged.
         assert len(result_low.groups) <= len(result_high.groups)
+
+
+class TestTokenRelationEquality:
+    def test_exact_mode_groups_only_identical_tokens(self) -> None:
+        records = [
+            LeakageRecord(0, "same", 0, 0, 0, 0),
+            LeakageRecord(1, "same", 1, 1, 0, 0),
+            LeakageRecord(2, "different", 1, 2, 0, 0),
+        ]
+        result = build_equality(records, "exact")
+        assert result.groups[0] == [0, 1]
+        assert result.group_of[2] == 2
+
+    def test_partial_mode_supports_mitra_tokens(self) -> None:
+        scheme = Mitra()
+        records = []
+        for qid, keyword in enumerate(("shared", "shared", "other")):
+            scheme.add(keyword, qid)
+            scheme.search(keyword)
+            records.append(LeakageRecord(qid, scheme.transcript.tokens[-1], 0, qid, 0, 0))
+
+        result = build_equality(records, "partial")
+
+        assert result.groups[0] == [0, 1]
+        assert result.group_of[2] == 2
+
+    def test_computational_mode_uses_fides_forward_check(self) -> None:
+        scheme = Fides()
+        records = []
+        tokens = []
+        for keyword, doc_id in (("shared", 1), ("shared", 2), ("other", 3)):
+            scheme.add(keyword, doc_id)
+            counter, token_value = scheme._keyword_state[keyword]
+            tokens.append(FidesToken(token_val=token_value, counter=counter))
+        # The shared keyword's two tokens must have distinct chain counters.
+        old_token, new_token, unrelated = tokens
+        assert old_token.counter < new_token.counter
+        records = [
+            LeakageRecord(0, old_token, 0, 0, 0, 0),
+            LeakageRecord(1, new_token, 1, 1, 0, 0),
+            LeakageRecord(2, unrelated, 1, 2, 0, 0),
+        ]
+
+        result = build_equality(
+            records,
+            "computational",
+            forward_check=lambda newer, older: scheme.check_token_link(
+                newer, older, steps=newer.counter - older.counter
+            ),
+        )
+
+        assert result.groups[0] == [0, 1]
+        assert result.group_of[2] == 2
+        with pytest.raises(ValueError, match="requires a forward_check"):
+            build_equality(records, "computational")
+
+    def test_irrelevant_tokens_can_still_use_response_similarity(self) -> None:
+        records = [
+            LeakageRecord(0, "random-a", 0, 0, 0, 0, fvol=Counter({2: 2})),
+            LeakageRecord(1, "random-b", 1, 1, 0, 0, fvol=Counter({2: 2})),
+        ]
+        result = build_equality(records, "T2", delta=0.6)
+        assert result.groups[0] == [0, 1]
 
 
 # ---------------------------------------------------------------------------

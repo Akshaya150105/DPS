@@ -56,6 +56,8 @@ PAPER_GRIDS: dict[str, str] = {
     "lvia_s_vs_tau": "grids/lvia_s_vs_tau.yaml",
     "LVIA-S vs eta": "grids/lvia_s_vs_eta.yaml",
     "lvia_s_vs_eta": "grids/lvia_s_vs_eta.yaml",
+    "No-update variants": "grids/no_update_variants.yaml",
+    "no_update_variants": "grids/no_update_variants.yaml",
 }
 
 
@@ -134,9 +136,12 @@ def load_dataset(
 def _normalize_attack_name(attack: str) -> str:
     """Normalize attack identifier to standard name."""
     a = attack.strip().lower().replace("_", "-")
-    if a in ("fma", "via", "pvia", "lvia-k", "lvia-s"):
+    if a in (
+        "fma", "via", "pvia", "lvia-k", "lvia-s",
+        "no-update-pvia", "no-update-lvia",
+    ):
         return a
-    if a in ("no-update", "no_update", "noupdate"):
+    if a in ("no-update", "no_update", "noupdate", "no-update-full"):
         return "no_update"
     return a
 
@@ -266,14 +271,28 @@ def run_one(
         aux = Aux(data_dist=dist)
         preds = lvia.run(records, aux, eq, mode="S", eta=valid_eta)
 
-    elif attack_name == "no_update":
+    elif attack_name in ("no_update", "no-update-pvia", "no-update-lvia"):
         records, gt, events = simulate(docs, sim_cfg)
         eq = build_equality(records, mode=equality_mode, delta=delta)
         if mu0 is None:
             mu0 = len(docs) // 2
-        snapshot = make_aux_pre_snapshot(docs, mu0=int(mu0))
-        aux = Aux(pre_snapshot=snapshot)
-        preds = no_update.run(records, aux, eq, mu0=int(mu0))
+        if attack_name == "no-update-lvia":
+            valid_eta = eta if 0.0 < eta <= 1.0 else 0.5
+            dist = make_aux_data_dist(docs, tau=tau, eta=valid_eta, rng=rng)
+            aux = Aux(data_dist=dist)
+            tolerance_value = float(tolerance) if tolerance is not None else 0.15
+            preds = no_update.no_update_lvia(
+                records, aux, eq, theta=tolerance_value, mu0=int(mu0)
+            )
+        else:
+            snapshot = make_aux_pre_snapshot(docs, mu0=int(mu0))
+            aux = Aux(pre_snapshot=snapshot)
+            if attack_name == "no-update-pvia":
+                preds = no_update.no_update_pvia(
+                    records, aux, eq, alpha=alpha, mu0=int(mu0)
+                )
+            else:
+                preds = no_update.run(records, aux, eq, mu0=int(mu0))
 
     else:
         raise ValueError(f"Unknown attack: {attack_name!r}")
@@ -546,6 +565,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to YAML grid configuration file, or paper grid preset name.",
     )
     parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="YAML configuration file for a single experiment.",
+    )
+    parser.add_argument(
         "--n-seeds",
         type=int,
         default=1,
@@ -564,7 +589,7 @@ def parse_args() -> argparse.Namespace:
     )
     # Direct single-run arguments
     parser.add_argument("--dataset", type=str, default="synthetic", help="Dataset name.")
-    parser.add_argument("--attack", type=str, default="fma", help="Attack: fma, via, pvia, lvia-k, lvia-s, no_update.")
+    parser.add_argument("--attack", type=str, default="fma", help="Attack: fma, via, pvia, lvia-k, lvia-s, no_update, no-update-pvia, no-update-lvia.")
     parser.add_argument("--equality", type=str, default="T1", help="Equality mode: T1 or T2.")
     parser.add_argument("--tau", type=int, default=3, help="Number of epochs/intervals.")
     parser.add_argument("--lambda", dest="lambda_queries", type=float, default=50.0, help="Poisson query rate.")
@@ -581,6 +606,8 @@ def main() -> None:
     """CLI entry point."""
     args = parse_args()
 
+    if args.grid and args.config:
+        raise ValueError("--grid and --config cannot be used together.")
     if args.grid:
         run_grid(
             grid=args.grid,
@@ -588,6 +615,15 @@ def main() -> None:
             csv_path=args.csv_path,
             dry_run=args.dry_run,
         )
+    elif args.config:
+        from config import load_config
+
+        cfg = load_config(args.config)
+        if args.dry_run:
+            print("[DRY-RUN] Single experiment:", cfg)
+        else:
+            result = run_one(cfg, csv_path=args.csv_path)
+            print(f"Result: {result}")
     else:
         cfg = {
             "dataset": args.dataset,
