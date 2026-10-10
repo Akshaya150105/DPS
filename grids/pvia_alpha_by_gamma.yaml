@@ -1,0 +1,25 @@
+# Figure 6: PVIA alpha by gamma
+dataset:
+  - enron
+attack:
+  - pvia
+tau:
+  - 10
+lambda:
+  - 500
+alpha:
+  - 0.5
+  - 0.6
+  - 0.7
+  - 0.8
+  - 0.9
+gamma:
+  - 0.1
+  - 0.2
+  - 0.3
+eta:
+  - 0.5
+noise:
+  - 0.0
+equality:
+  - T1

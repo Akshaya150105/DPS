@@ -32,3 +32,4 @@ class Config:
     noise_n: float = 0.0
     equality: str = "T1"
     delta: float = 0.6
+    attack: str = "fma"

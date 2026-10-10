@@ -1,0 +1,23 @@
+# Figure 7(c): LVIA-S vs eta
+dataset:
+  - enron
+attack:
+  - lvia-s
+tau:
+  - 18
+lambda:
+  - 500
+gamma:
+  - 0.0
+alpha:
+  - 0.3
+eta:
+  - 0.1
+  - 0.2
+  - 0.3
+  - 0.4
+  - 0.5
+noise:
+  - 0.0
+equality:
+  - T1

@@ -1,0 +1,24 @@
+# Figure 5(d): FMA vs gamma
+dataset:
+  - enron
+attack:
+  - fma
+tau:
+  - 24
+lambda:
+  - 120000
+gamma:
+  - 0.0
+  - 0.05
+  - 0.10
+  - 0.15
+  - 0.20
+alpha:
+  - 0.3
+eta:
+  - 0.5
+noise:
+  - 0.0
+equality:
+  - T1
+  - T2

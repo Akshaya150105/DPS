@@ -1,0 +1,23 @@
+# Figure 5(c): FMA vs lambda
+dataset:
+  - enron
+attack:
+  - fma
+tau:
+  - 24
+lambda:
+  - 120000
+  - 240000
+  - 360000
+  - 480000
+gamma:
+  - 0.0
+alpha:
+  - 0.3
+eta:
+  - 0.5
+noise:
+  - 0.0
+equality:
+  - T1
+  - T2

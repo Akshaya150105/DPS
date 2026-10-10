@@ -1,0 +1,24 @@
+# Figure 5(a): FMA vs tau with T1 and T2
+dataset:
+  - enron
+attack:
+  - fma
+tau:
+  - 1
+  - 6
+  - 12
+  - 18
+  - 24
+lambda:
+  - 120000
+gamma:
+  - 0.0
+alpha:
+  - 0.3
+eta:
+  - 0.5
+noise:
+  - 0.0
+equality:
+  - T1
+  - T2
