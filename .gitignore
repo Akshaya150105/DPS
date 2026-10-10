@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+myenv/
+venv/
+.venv/
+env/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Results (large files; keep structure, ignore content)
+results/csv/*.csv
+results/figures/*.png
+results/figures/*.pdf
+
+# Datasets (raw data; do not commit)
+datasets/
+
+# IDE
+.vscode/
+.idea/
+*.swp
