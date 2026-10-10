@@ -169,3 +169,83 @@ class TestSimulateModesAndEdgeCases:
         assert records == []
         assert ground_truth == {}
         assert events == []
+
+
+# ---------------------------------------------------------------------------
+# Patch 8b: Query all keywords after insertion interval
+# ---------------------------------------------------------------------------
+
+class TestQueryAllAfterInsert:
+    """Tests for query_all_after_insert parameter and probe records."""
+
+    def test_every_keyword_has_probe_in_every_interval_when_flag_on(self, synthetic_docs) -> None:
+        """When query_all_after_insert=True, every keyword must have a probe record in every interval."""
+        tau = 3
+        cfg = Config(seed=42, tau=tau, lambda_queries=30.0, gamma=0.1)
+        records, ground_truth, _ = simulate(synthetic_docs, cfg, query_all_after_insert=True)
+
+        vocab = sorted({kw for doc in synthetic_docs for kw in doc.keywords})
+        assert len(vocab) > 0
+
+        # For every interval and every keyword, verify at least one probe record exists
+        for t in range(tau):
+            for kw in vocab:
+                probes = [
+                    r for r in records
+                    if r.interval == t and r.is_probe and ground_truth[r.query_id] == kw
+                ]
+                assert len(probes) == 1, (
+                    f"Interval {t}, keyword '{kw}': expected exactly 1 probe record, found {len(probes)}."
+                )
+                p = probes[0]
+                assert p.is_probe is True
+                assert p.ulen >= p.rlen >= 0
+                assert (p.ulen + p.rlen) % 2 == 0
+
+    def test_default_parameter_is_true(self, synthetic_docs) -> None:
+        """Default value of query_all_after_insert must be True."""
+        cfg = Config(seed=42, tau=3, lambda_queries=30.0, gamma=0.1)
+        records, ground_truth, _ = simulate(synthetic_docs, cfg)
+
+        # Probes must be present
+        probe_count = sum(1 for r in records if r.is_probe)
+        vocab = sorted({kw for doc in synthetic_docs for kw in doc.keywords})
+        assert probe_count == cfg.tau * len(vocab)
+
+    def test_flag_off_produces_no_probes(self, synthetic_docs) -> None:
+        """When query_all_after_insert=False, no probe records must be produced."""
+        cfg = Config(seed=42, tau=3, lambda_queries=30.0, gamma=0.1)
+        records, ground_truth, _ = simulate(synthetic_docs, cfg, query_all_after_insert=False)
+
+        assert len(records) > 0
+        assert all(not r.is_probe for r in records)
+
+    def test_accuracy_computed_only_on_sampled_queries(self, synthetic_docs) -> None:
+        """Accuracy must be evaluated only on sampled queries, ignoring probe records."""
+        from evaluate import accuracy
+
+        cfg = Config(seed=42, tau=3, lambda_queries=40.0, gamma=0.1)
+        records, ground_truth, _ = simulate(synthetic_docs, cfg, query_all_after_insert=True)
+
+        sampled_qids = {r.query_id for r in records if not r.is_probe}
+        probe_qids = {r.query_id for r in records if r.is_probe}
+
+        assert len(sampled_qids) > 0
+        assert len(probe_qids) > 0
+
+        # Construct predictions that are 100% correct on sampled queries,
+        # but completely wrong or None on probe queries.
+        preds: dict[int, str | None] = {}
+        for qid in sampled_qids:
+            preds[qid] = ground_truth[qid]
+        for qid in probe_qids:
+            preds[qid] = "WRONG_KEYWORD"
+
+        # Explicit records parameter
+        acc_with_records = accuracy(preds, ground_truth, records=records)
+        assert acc_with_records == pytest.approx(1.0)
+
+        # Automatic exclusion via GroundTruth sampled_query_ids tracking
+        acc_auto = accuracy(preds, ground_truth)
+        assert acc_auto == pytest.approx(1.0)
+

@@ -381,6 +381,34 @@ class Fides:
         """Instance method for forward_check using the instance's modulus."""
         return self.forward_check(newer_token, older_token, steps, n=self.n, e=self.e)
 
+    def make_forward_check(self):
+        """Return a ``forward_check(new_token, old_token) -> bool`` callable.
+
+        The returned callable is suitable for passing to
+        :func:`equality.build_equality` in ``'computational'`` mode.  It
+        infers the number of chain steps from the counter difference between
+        the two :class:`FidesToken` arguments.
+
+        BSigma produces exact tokens (string labels); Mitra produces partial
+        tokens (``MitraToken.keyword_component`` is the shared prefix); Fides
+        exposes this callable so the equality layer can reconstruct groups
+        without the private key.
+
+        Returns:
+            Callable ``(newer_token, older_token) -> bool`` that returns
+            ``True`` when *older_token* is derivable from *newer_token* via
+            the public RSA exponent ``e``.
+        """
+        def _check(newer_token: FidesToken, older_token: FidesToken) -> bool:
+            if not (isinstance(newer_token, FidesToken) and
+                    isinstance(older_token, FidesToken)):
+                return False
+            steps = newer_token.counter - older_token.counter
+            if steps <= 0:
+                return False
+            return self.check_token_link(newer_token, older_token, steps=steps)
+        return _check
+
 
 # ---------------------------------------------------------------------------
 # Scheme (c): Mitra (HMAC-SHA256 Based)

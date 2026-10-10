@@ -338,3 +338,174 @@ class TestCLI:
         assert (out_dir / "enron.pkl").exists()
         assert (out_dir / "enron_index.json").exists()
         assert (out_dir / "enron_metadata.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Tests for Patch 16b: Monthly Intervals and Date Ranges
+# ---------------------------------------------------------------------------
+
+class TestMonthlyIntervals:
+    """Tests for split_into_intervals and date range filtering."""
+
+    def test_split_into_intervals_fake_maildir_lands_in_expected_months(self, tmp_path: Path):
+        """Test on fake maildir that documents land in expected month intervals."""
+        maildir = create_fake_maildir(tmp_path)
+        out_dir = tmp_path / "processed_intervals"
+
+        # Preprocess dataset specifying Enron default dates: 1999-12-01 to 2001-02-27
+        metadata = preprocess.preprocess_dataset(
+            source="enron",
+            path=str(maildir),
+            k=500,
+            start="1999-12-01",
+            end="2001-02-27",
+            out_dir=str(out_dir),
+        )
+
+        with open(out_dir / "enron.pkl", "rb") as f:
+            docs, vocab, name = pickle.load(f)
+
+        assert len(docs) == 3
+        # In create_fake_maildir, all 3 valid emails are from Jan 10-12, 2001.
+        # From 1999-12-01, January 2001 is interval: (2001-1999)*12 + (1-12) = 13.
+        for doc in docs:
+            assert doc.interval == 13
+
+        # Verify interval index is saved inside processed dataset artifacts
+        assert metadata["num_intervals"] == 1
+        assert metadata["intervals"] == [13]
+        assert metadata["interval_index"] == {d.doc_id: 13 for d in docs}
+
+        intervals_file = out_dir / "enron_intervals.json"
+        assert intervals_file.exists()
+        with open(intervals_file, "r", encoding="utf-8") as f:
+            intervals_data = json.load(f)
+        assert intervals_data == {str(d.doc_id): 13 for d in docs}
+
+    def test_split_into_intervals_multi_month_and_out_of_range_dropping(self):
+        """Test that documents across different months receive correct intervals and out-of-range docs are dropped."""
+        from datetime import datetime, timezone
+        from types_ import Document
+
+        docs = [
+            Document(doc_id=0, keywords=frozenset({"a"}), timestamp=datetime(1999, 11, 28, 12, 0, tzinfo=timezone.utc)), # before start (dropped)
+            Document(doc_id=1, keywords=frozenset({"b"}), timestamp=datetime(1999, 12, 1, 0, 0, tzinfo=timezone.utc)),   # month 0
+            Document(doc_id=2, keywords=frozenset({"c"}), timestamp=datetime(2000, 1, 15, 10, 0, tzinfo=timezone.utc)),  # month 1
+            Document(doc_id=3, keywords=frozenset({"d"}), timestamp=datetime(2000, 6, 20, 15, 0, tzinfo=timezone.utc)),  # month 6
+            Document(doc_id=4, keywords=frozenset({"e"}), timestamp=datetime(2001, 2, 27, 23, 0, tzinfo=timezone.utc)),  # month 14
+            Document(doc_id=5, keywords=frozenset({"f"}), timestamp=datetime(2001, 3, 1, 8, 0, tzinfo=timezone.utc)),   # after end (dropped)
+        ]
+
+        filtered = preprocess.split_into_intervals(
+            docs,
+            start="1999-12-01",
+            end="2001-02-27",
+            freq="month",
+        )
+
+        assert len(filtered) == 4
+        assert [d.doc_id for d in filtered] == [1, 2, 3, 4]
+        assert [d.interval for d in filtered] == [0, 1, 6, 14]
+
+    def test_lucene_default_interval_splitting(self):
+        """Test Lucene default interval range 2006-06-01 to 2006-11-30."""
+        from datetime import datetime, timezone
+        from types_ import Document
+
+        docs = [
+            Document(doc_id=0, keywords=frozenset({"x"}), timestamp=datetime(2006, 5, 31, 23, 59, tzinfo=timezone.utc)), # dropped
+            Document(doc_id=1, keywords=frozenset({"x"}), timestamp=datetime(2006, 6, 1, 0, 0, tzinfo=timezone.utc)),   # month 0
+            Document(doc_id=2, keywords=frozenset({"y"}), timestamp=datetime(2006, 8, 15, 12, 0, tzinfo=timezone.utc)),  # month 2
+            Document(doc_id=3, keywords=frozenset({"z"}), timestamp=datetime(2006, 11, 30, 23, 59, tzinfo=timezone.utc)), # month 5
+            Document(doc_id=4, keywords=frozenset({"w"}), timestamp=datetime(2006, 12, 1, 0, 0, tzinfo=timezone.utc)),  # dropped
+        ]
+
+        filtered = preprocess.split_into_intervals(
+            docs,
+            start="2006-06-01",
+            end="2006-11-30",
+            freq="month",
+        )
+
+        assert len(filtered) == 3
+        assert [d.doc_id for d in filtered] == [1, 2, 3]
+        assert [d.interval for d in filtered] == [0, 2, 5]
+
+    def test_validation_errors(self):
+        """Test invalid start/end dates and unsupported frequency."""
+        from types_ import Document
+        from datetime import datetime, timezone
+
+        docs = [Document(doc_id=0, keywords=frozenset(), timestamp=datetime(2000, 1, 1, tzinfo=timezone.utc))]
+
+        with pytest.raises(ValueError, match="Start date .* cannot be after end date"):
+            preprocess.split_into_intervals(docs, start="2001-01-01", end="2000-01-01")
+
+        with pytest.raises(ValueError, match="Unsupported frequency"):
+            preprocess.split_into_intervals(docs, start="2000-01-01", end="2000-02-01", freq="century")
+
+        with pytest.raises(ValueError, match="start and end boundaries"):
+            preprocess.split_into_intervals(docs, start=None, end="2000-02-01")
+
+    def test_cli_lucene_prints_omitted_year_note(self, tmp_path: Path):
+        """Test CLI prints note when preprocessing Lucene with default dates."""
+        mbox_dir = create_fake_mbox(tmp_path)
+        out_dir = tmp_path / "cli_lucene"
+
+        cmd = [
+            sys.executable,
+            "preprocess.py",
+            "--source",
+            "lucene",
+            "--path",
+            str(mbox_dir),
+            "--out-dir",
+            str(out_dir),
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        assert "The paper omits the year for the Lucene end date" in result.stdout
+        assert "2006-11-30" in result.stdout
+
+    def test_cli_enron_custom_start_end(self, tmp_path: Path):
+        """Test CLI with explicit --start and --end options."""
+        maildir = create_fake_maildir(tmp_path)
+        out_dir = tmp_path / "cli_enron_custom"
+
+        cmd = [
+            sys.executable,
+            "preprocess.py",
+            "--source",
+            "enron",
+            "--path",
+            str(maildir),
+            "--start",
+            "2001-01-01",
+            "--end",
+            "2001-01-31",
+            "--out-dir",
+            str(out_dir),
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        assert (out_dir / "enron.pkl").exists()
+        with open(out_dir / "enron.pkl", "rb") as f:
+            docs, _, _ = pickle.load(f)
+
+        # In January 2001 with start=2001-01-01, month offset is 0
+        assert len(docs) == 3
+        for d in docs:
+            assert d.interval == 0
+

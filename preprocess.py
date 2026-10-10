@@ -418,6 +418,116 @@ def parse_date(date_str: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _parse_bound(val: Any, is_end: bool = False) -> datetime:
+    """Parse a date boundary into a timezone-aware UTC datetime.
+
+    If is_end is True and val is specified as a date without explicit non-zero
+    time components, the time is set to 23:59:59.999999 to cover the entire day.
+    """
+    if isinstance(val, datetime):
+        dt = val
+        if is_end and (dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0):
+            dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    elif hasattr(val, "year") and hasattr(val, "month") and hasattr(val, "day"):
+        dt = datetime(val.year, val.month, val.day)
+        if is_end:
+            dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    elif isinstance(val, str):
+        val_str = val.strip()
+        if len(val_str) == 10 and val_str.count("-") == 2:
+            dt = datetime.strptime(val_str, "%Y-%m-%d")
+            if is_end:
+                dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+        else:
+            try:
+                dt = datetime.fromisoformat(val_str)
+            except ValueError:
+                dt = email.utils.parsedate_to_datetime(val_str)
+    else:
+        raise TypeError(f"Invalid date boundary type: {type(val)!r}")
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def split_into_intervals(
+    docs: list[Document],
+    start: Any,
+    end: Any,
+    freq: str = "month",
+) -> list[Document]:
+    """Assign each document an interval index by month and drop docs outside range.
+
+    Reference: Section 6 of 'Leakage-Abuse Attacks Against Forward and Backward
+    Private Searchable Symmetric Encryption' (CCS 2023).
+
+    Args:
+        docs:  List of Document instances (or objects with timestamp, doc_id, keywords).
+        start: Start date boundary (str like 'YYYY-MM-DD' or datetime/date object).
+        end:   End date boundary (str like 'YYYY-MM-DD' or datetime/date object).
+        freq:  Interval frequency ('month' by default; supports 'day', 'week', 'year').
+
+    Returns:
+        List of Document instances that fall within [start, end], each with
+        an assigned interval index.
+
+    Raises:
+        ValueError: If start is after end, or if freq is unsupported.
+    """
+    if start is None or end is None:
+        raise ValueError("start and end boundaries must both be specified.")
+
+    start_dt = _parse_bound(start, is_end=False)
+    end_dt = _parse_bound(end, is_end=True)
+
+    if start_dt > end_dt:
+        raise ValueError(
+            f"Start date ({start!r}) cannot be after end date ({end!r})."
+        )
+
+    freq_norm = str(freq).strip().lower()
+    if freq_norm not in ("month", "m", "monthly", "day", "d", "daily", "week", "w", "weekly", "year", "y", "yearly"):
+        raise ValueError(
+            f"Unsupported frequency: {freq!r}. Must be 'month', 'day', 'week', or 'year'."
+        )
+
+    start_utc = start_dt.astimezone(timezone.utc)
+    end_utc = end_dt.astimezone(timezone.utc)
+
+    filtered_docs: list[Document] = []
+    for doc in docs:
+        dt = doc.timestamp
+        if dt.tzinfo is None:
+            dt_utc = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt_utc = dt.astimezone(timezone.utc)
+
+        if dt_utc < start_utc or dt_utc > end_utc:
+            continue
+
+        if freq_norm in ("month", "m", "monthly"):
+            interval = (dt_utc.year - start_utc.year) * 12 + (dt_utc.month - start_utc.month)
+        elif freq_norm in ("day", "d", "daily"):
+            interval = (dt_utc.date() - start_utc.date()).days
+        elif freq_norm in ("week", "w", "weekly"):
+            interval = (dt_utc.date() - start_utc.date()).days // 7
+        elif freq_norm in ("year", "y", "yearly"):
+            interval = dt_utc.year - start_utc.year
+        else:
+            interval = 0
+
+        new_doc = Document(
+            doc_id=doc.doc_id,
+            keywords=doc.keywords,
+            timestamp=doc.timestamp,
+            interval=interval,
+        )
+        filtered_docs.append(new_doc)
+
+    return filtered_docs
+
+
 # ---------------------------------------------------------------------------
 # Source loaders: Enron maildir and Lucene mbox
 # ---------------------------------------------------------------------------
@@ -524,6 +634,9 @@ def preprocess_dataset(
     stem: bool = False,
     name: Optional[str] = None,
     out_dir: str = "datasets/processed",
+    start: Optional[Any] = None,
+    end: Optional[Any] = None,
+    freq: str = "month",
 ) -> dict[str, Any]:
     """Parse raw messages, select top-K keywords, and save processed artifacts.
 
@@ -532,6 +645,7 @@ def preprocess_dataset(
         - `{name}_index.json`: keyword -> list of doc_ids
         - `{name}_metadata.json`: counts and date range
         - `{name}_meta.json`: alias for metadata
+        - `{name}_intervals.json`: doc_id -> interval (if intervals applied)
 
     Args:
         source:  'enron' or 'lucene'.
@@ -540,6 +654,9 @@ def preprocess_dataset(
         stem:    Whether to apply Porter stemming.
         name:    Dataset identifier (defaults to source).
         out_dir: Destination folder for output files.
+        start:   Optional start date boundary for interval filtering.
+        end:     Optional end date boundary for interval filtering.
+        freq:    Interval frequency ('month' by default).
 
     Returns:
         Metadata dict summarizing document counts, vocabulary, and date range.
@@ -587,6 +704,14 @@ def preprocess_dataset(
         filtered_keywords = frozenset(tok for tok in unique_tokens if tok in vocab_set)
         docs.append(Document(doc_id=doc_id, keywords=filtered_keywords, timestamp=dt))
 
+    # Apply date range filtering and interval assignment if requested
+    if start is not None or end is not None:
+        if start is None:
+            start = "1999-12-01" if source_lower == "enron" else "2006-06-01"
+        if end is None:
+            end = "2001-02-27" if source_lower == "enron" else "2006-11-30"
+        docs = split_into_intervals(docs, start=start, end=end, freq=freq)
+
     # 5. Build keyword to document IDs inverted index
     kw_to_docs: dict[str, list[int]] = {kw: [] for kw in vocab}
     for doc in docs:
@@ -599,6 +724,11 @@ def preprocess_dataset(
     max_date = docs[-1].timestamp if docs else None
 
     # 7. Metadata summary
+    has_intervals = any(doc.interval is not None for doc in docs)
+    distinct_intervals = (
+        sorted(set(doc.interval for doc in docs if doc.interval is not None))
+        if has_intervals else []
+    )
     metadata: dict[str, Any] = {
         "name": name,
         "source": source_lower,
@@ -619,6 +749,9 @@ def preprocess_dataset(
         },
         "start_date": min_date.isoformat() if min_date else None,
         "end_date": max_date.isoformat() if max_date else None,
+        "num_intervals": len(distinct_intervals),
+        "intervals": distinct_intervals,
+        "interval_index": {doc.doc_id: doc.interval for doc in docs if doc.interval is not None},
     }
 
     # 8. Save artifacts under out_dir
@@ -640,6 +773,11 @@ def preprocess_dataset(
     meta_alias = os.path.join(out_dir, f"{name}_meta.json")
     with open(meta_alias, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
+
+    if has_intervals:
+        intervals_path = os.path.join(out_dir, f"{name}_intervals.json")
+        with open(intervals_path, "w", encoding="utf-8") as f:
+            json.dump({str(doc.doc_id): doc.interval for doc in docs}, f, indent=2)
 
     return metadata
 
@@ -686,8 +824,41 @@ def main(argv: Optional[list[str]] = None) -> None:
         default=None,
         help="Dataset name (defaults to --source).",
     )
+    parser.add_argument(
+        "--start",
+        default=None,
+        help="Start date for filtering (YYYY-MM-DD). Defaults: Enron 1999-12-01, Lucene 2006-06-01.",
+    )
+    parser.add_argument(
+        "--end",
+        default=None,
+        help="End date for filtering (YYYY-MM-DD). Defaults: Enron 2001-02-27, Lucene 2006-11-30.",
+    )
+    parser.add_argument(
+        "--freq",
+        default="month",
+        help="Interval frequency (default: 'month').",
+    )
 
     args = parser.parse_args(argv)
+
+    start = args.start
+    end = args.end
+
+    if args.source == "enron":
+        if start is None:
+            start = "1999-12-01"
+        if end is None:
+            end = "2001-02-27"
+    elif args.source == "lucene":
+        if start is None:
+            start = "2006-06-01"
+        if end is None:
+            end = "2006-11-30"
+        print(
+            "Note: The paper omits the year for the Lucene end date; "
+            "using default 2006-11-30 (this choice must be documented in the report)."
+        )
 
     preprocess_dataset(
         source=args.source,
@@ -696,8 +867,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         stem=args.stem,
         name=args.name,
         out_dir=args.out_dir,
+        start=start,
+        end=end,
+        freq=args.freq,
     )
 
 
 if __name__ == "__main__":
     main()
+

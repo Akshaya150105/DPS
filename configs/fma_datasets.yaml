@@ -1,0 +1,29 @@
+# Section 5 / Table 2: FMA on en/lu datasets with 500, 1000, 2000, 3000 keywords
+# tau=24 intervals, lambda=120000, gamma=0 (no deletions), T1 and T2 equality
+# Reproduces the paper's main FMA comparison across dataset sizes.
+dataset:
+  - en500
+  - en1000
+  - en2000
+  - en3000
+  - lu500
+  - lu1000
+  - lu2000
+  - lu3000
+attack:
+  - fma
+tau:
+  - 24
+lambda:
+  - 120000
+gamma:
+  - 0.0
+alpha:
+  - 0.3
+eta:
+  - 0.5
+noise:
+  - 0.0
+equality:
+  - T1
+  - T2

@@ -26,6 +26,7 @@ class Document:
     doc_id: int
     keywords: frozenset[str]
     timestamp: datetime
+    interval: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class LeakageRecord:
     ulen: int
     rlen: int
     fvol: collections.Counter = field(default_factory=collections.Counter)
+    is_probe: bool = False
 
 
 # ---------------------------------------------------------------------------

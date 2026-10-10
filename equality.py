@@ -79,10 +79,11 @@ def build_equality(
     records: list[LeakageRecord],
     mode: str,
     delta: float = 0.6,
+    forward_check=None,
 ) -> EqualityResult:
     """Group search queries that are believed to be for the same keyword.
 
-    Two inference strategies are supported:
+    Five inference strategies are supported:
 
     **T1** – *Token prefix matching*:
         Two queries are equal iff their token strings share the same prefix
@@ -96,21 +97,49 @@ def build_equality(
         intervals are compared.  All such linked pairs are fed into a
         Union-Find to produce transitive groups.
 
+    **exact** – *Exact token equality* (e.g. BSigma):
+        Two queries are equal iff their tokens compare equal (``==``).
+        Works with any token type that supports equality.
+
+    **partial** – *Shared first component* (e.g. Mitra, Janus++):
+        Tokens are objects with a ``keyword_component`` attribute (or strings
+        split on ``'|'``); two queries are grouped when their first component
+        is identical.  Mirrors the keyword-derived prefix shared by Mitra
+        tokens.
+
+    **computational** – *Forward-derivability* (e.g. Fides):
+        Accepts a *callable* ``forward_check(new_token, old_token) -> bool``
+        that returns ``True`` when *old_token* is computable from *new_token*.
+        Any pair for which ``forward_check`` returns ``True`` is merged into
+        one equality group via Union-Find, giving transitive closure.
+
     Args:
-        records: List of :class:`~types_.LeakageRecord` objects (any order).
-        mode:    ``'T1'`` or ``'T2'`` (case-insensitive).
-        delta:   RSP threshold for T2 linking (default 0.6, ignored in T1).
+        records:       List of :class:`~types_.LeakageRecord` objects (any order).
+        mode:          ``'T1'``, ``'T2'``, ``'exact'``, ``'partial'``, or
+                       ``'computational'`` (case-insensitive).
+        delta:         RSP threshold for T2 linking (default 0.6, ignored in
+                       all other modes).
+        forward_check: Callable ``(new_token, old_token) -> bool`` required
+                       when *mode* is ``'computational'``; ignored otherwise.
 
     Returns:
         An :class:`EqualityResult` with ``groups``, ``group_of``, and
         ``linked_pairs`` populated.
 
     Raises:
-        ValueError: If *mode* is not ``'T1'`` or ``'T2'``.
+        ValueError: If *mode* is unrecognised, or if ``'computational'`` is
+                    requested without a *forward_check* callable.
     """
     mode_upper = mode.strip().upper()
-    if mode_upper not in ("T1", "T2"):
-        raise ValueError(f"Unknown mode {mode!r}. Expected 'T1' or 'T2'.")
+    _VALID_MODES = ("T1", "T2", "EXACT", "PARTIAL", "COMPUTATIONAL")
+    if mode_upper not in _VALID_MODES:
+        raise ValueError(
+            f"Unknown mode {mode!r}. Expected one of {_VALID_MODES}."
+        )
+    if mode_upper == "COMPUTATIONAL" and forward_check is None:
+        raise ValueError(
+            "'computational' mode requires a forward_check callable."
+        )
 
     uf = UnionFind()
     # Seed every query_id as its own set.
@@ -119,8 +148,14 @@ def build_equality(
 
     if mode_upper == "T1":
         _link_t1(records, uf)
-    else:
+    elif mode_upper == "T2":
         _link_t2(records, uf, delta)
+    elif mode_upper == "EXACT":
+        _link_exact(records, uf)
+    elif mode_upper == "PARTIAL":
+        _link_partial(records, uf)
+    else:  # COMPUTATIONAL
+        _link_computational(records, uf, forward_check)
 
     return _build_result(records, uf)
 
@@ -169,9 +204,85 @@ def _link_t2(records: list[LeakageRecord], uf: UnionFind, delta: float) -> None:
                 if rec_b.query_id <= rec_a.query_id:
                     # Avoid double-counting; only process (a, b) with b > a.
                     continue
+                # Do not link probe queries with other queries in the same interval
+                if rec_a.interval == rec_b.interval and (getattr(rec_a, "is_probe", False) or getattr(rec_b, "is_probe", False)):
+                    continue
                 sim = leakage.rsp(rec_a.fvol, rec_b.fvol)
                 if sim >= delta:
                     uf.union(rec_a.query_id, rec_b.query_id)
+
+
+# ---------------------------------------------------------------------------
+# 'exact' strategy
+# ---------------------------------------------------------------------------
+
+def _link_exact(records: list[LeakageRecord], uf: UnionFind) -> None:
+    """Group records whose tokens compare equal (BSigma-style deterministic tokens)."""
+    token_to_root: dict = {}
+    for rec in sorted(records, key=lambda r: r.query_id):
+        tok = rec.token
+        if tok in token_to_root:
+            uf.union(token_to_root[tok], rec.query_id)
+        else:
+            token_to_root[tok] = rec.query_id
+
+
+# ---------------------------------------------------------------------------
+# 'partial' strategy
+# ---------------------------------------------------------------------------
+
+def _get_partial_key(token) -> str:
+    """Extract the keyword-shared component from a token.
+
+    Supports:
+    - Objects with a ``keyword_component`` attribute (MitraToken).
+    - Strings split on ``'|'`` (T1-style tokens).
+    - Any other type: falls back to ``str(token)``.
+    """
+    if hasattr(token, "keyword_component"):
+        return str(token.keyword_component)
+    if isinstance(token, str) and "|" in token:
+        return token.split("|")[0]
+    return str(token)
+
+
+def _link_partial(records: list[LeakageRecord], uf: UnionFind) -> None:
+    """Group records that share the same keyword-derived token component (Mitra/Janus++)."""
+    component_to_root: dict[str, int] = {}
+    for rec in sorted(records, key=lambda r: r.query_id):
+        key = _get_partial_key(rec.token)
+        if key in component_to_root:
+            uf.union(component_to_root[key], rec.query_id)
+        else:
+            component_to_root[key] = rec.query_id
+
+
+# ---------------------------------------------------------------------------
+# 'computational' strategy
+# ---------------------------------------------------------------------------
+
+def _link_computational(
+    records: list[LeakageRecord],
+    uf: UnionFind,
+    forward_check,
+) -> None:
+    """Group records linked by forward_check(new_token, old_token) -> bool.
+
+    All-pairs check: O(n^2) in the number of records.  For each ordered pair
+    (newer, older) the callable is invoked; a ``True`` result merges the two
+    query_ids into the same group.
+    """
+    sorted_recs = sorted(records, key=lambda r: (r.timestamp, r.query_id))
+    n = len(sorted_recs)
+    for i in range(n):
+        for j in range(i):  # j < i means j is "older" by sort order
+            newer = sorted_recs[i]
+            older = sorted_recs[j]
+            try:
+                if forward_check(newer.token, older.token):
+                    uf.union(newer.query_id, older.query_id)
+            except Exception:  # pragma: no cover – defensive
+                pass
 
 
 # ---------------------------------------------------------------------------

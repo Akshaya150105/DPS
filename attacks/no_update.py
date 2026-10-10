@@ -119,3 +119,255 @@ def run(
             predictions[q.query_id] = None
 
     return predictions
+
+
+# ---------------------------------------------------------------------------
+# Section 6.3 Variant A: Partial-knowledge PVIA on the pre-snapshot
+# ---------------------------------------------------------------------------
+
+def no_update_pvia(
+    records,
+    aux,
+    equality,
+    alpha: float,
+    mu0: int = 0,
+):
+    """Section 6.3 variant: Partial-snapshot PVIA without update knowledge.
+
+    The attacker knows only a fraction *alpha* of the pre-mu0 snapshot.
+    The candidate window is relaxed to ``alpha * L[w] <= a_q~`` (accounting
+    for unseen documents), and the prediction is the candidate with the
+    largest multiset overlap between its snapshot document volumes and the
+    volumes observed in fvol_q~.  Ties are broken by proximity to a_q~.
+
+    Unlike the standard PVIA (which works on inserted documents between a
+    linked pair), this variant operates on the static snapshot and therefore
+    does **not** require a linked pair – every query is assigned a prediction.
+
+    Args:
+        records:  List of LeakageRecord objects.
+        aux:      Adversary auxiliary knowledge. Must contain ``pre_snapshot``
+                  (the *known* fraction of the snapshot, as Document objects).
+        equality: EqualityResult containing query groupings.
+        alpha:    Fraction of the snapshot known to the attacker (0 < alpha <= 1).
+                  Used to derive the lower bound ``alpha * L[w]`` for candidates.
+        mu0:      Logical timestamp cutoff used to identify the proxy query q~.
+
+    Returns:
+        Dict mapping ``query_id -> predicted keyword`` (or ``None`` when no
+        candidate survives the window filter).  Every query_id is present.
+
+    Raises:
+        ValueError: If *alpha* is not in the interval (0, 1].
+    """
+    from collections import Counter, defaultdict
+
+    if not (0.0 < alpha <= 1.0):
+        raise ValueError(
+            f"alpha must be in the interval (0, 1], got {alpha!r}."
+        )
+
+    if mu0 is None:
+        mu0 = getattr(aux, "mu0", 0)
+
+    predictions = {rec.query_id: None for rec in records}
+
+    if not records or aux.pre_snapshot is None:
+        return predictions
+
+    rec_map = {r.query_id: r for r in records}
+    snapshot_docs = aux.pre_snapshot
+
+    # Build L[w] (count on the known fraction) and V_multi[w] (multiset of volumes)
+    L = defaultdict(int)
+    V_multi = defaultdict(Counter)
+    vocab_set = set()
+
+    for doc in snapshot_docs:
+        kws = doc.keywords if hasattr(doc, "keywords") else set()
+        vol = len(kws)
+        for w in kws:
+            L[w] += 1
+            V_multi[w][vol] += 1
+            vocab_set.add(w)
+
+    vocab = sorted(vocab_set)
+    if not vocab:
+        return predictions
+
+    for q in records:
+        gid = equality.group_of.get(q.query_id)
+        if gid is not None and gid in equality.groups:
+            linked_recs = [rec_map[qid] for qid in equality.groups[gid] if qid in rec_map]
+        else:
+            linked_recs = [q]
+
+        after_mu0 = [r for r in linked_recs if r.timestamp >= mu0]
+        if after_mu0:
+            q_tilde = min(after_mu0, key=lambda r: (r.timestamp - mu0, r.query_id))
+        else:
+            q_tilde = q
+
+        a_q_tilde = int(round((q_tilde.ulen + q_tilde.rlen) / 2.0))
+
+        # Candidate window: alpha * L[w] <= a_q~ (relaxed lower bound)
+        candidates = [w for w in vocab if alpha * L[w] <= a_q_tilde]
+
+        if not candidates:
+            predictions[q.query_id] = None
+            continue
+
+        def _overlap_score(w):
+            overlap = sum(
+                min(q_tilde.fvol[vol], V_multi[w][vol])
+                for vol in q_tilde.fvol
+                if q_tilde.fvol[vol] > 0
+            )
+            dist = abs(L[w] - a_q_tilde)
+            return (overlap, -dist)
+
+        best = max(candidates, key=_overlap_score)
+        best_score = _overlap_score(best)
+        top_cands = [w for w in candidates if _overlap_score(w) == best_score]
+
+        if len(top_cands) == 1:
+            predictions[q.query_id] = top_cands[0]
+        else:
+            # Further break ties alphabetically for determinism
+            predictions[q.query_id] = min(top_cands)
+
+    return predictions
+
+
+# ---------------------------------------------------------------------------
+# Section 6.3 Variant B: Count-distribution LVIA on the pre-snapshot
+# ---------------------------------------------------------------------------
+
+def no_update_lvia(
+    records,
+    aux,
+    equality,
+    mu0: int = 0,
+    window=None,
+):
+    """Section 6.3 variant: Snapshot-count LVIA without update knowledge.
+
+    The attacker knows only the **keyword count distribution** of the snapshot
+    - the value L[w] for each keyword w - but does not have access to individual
+    documents or their volumes.  This is strictly weaker than ``run()`` (which
+    additionally uses the volume filter) and strictly weaker than the full LVIA
+    (which uses per-interval cumulative counts from the update log).
+
+    Algorithm
+    ---------
+    For each query q:
+      1. Identify q~ (closest linked query after mu0, or q itself).
+      2. Compute a_q~ = (ulen + rlen) / 2.
+      3. Form the candidate set: keywords w satisfying
+             |L[w] - a_q~| <= window
+         where *window* defaults to ``max(2, round(0.15 * a_q~))``.
+      4. Accumulate one vote per matching keyword for the equality group.
+
+    After processing all queries in a group, the keyword with the most votes
+    (ties broken by smallest |L[w] - mean(a_q~)|) is assigned to all queries
+    in the group.
+
+    .. note::
+        **LVIA is expected to weaken here** because *update diversity* - the
+        variety in fvol values across successive queries for the same keyword -
+        cannot be exploited.  Without per-document volume information, all
+        keywords with a similar snapshot count are equally plausible.  The vote
+        aggregation step provides only weak disambiguation, so accuracy is lower
+        than full LVIA-K/LVIA-S.
+
+    Args:
+        records:  List of LeakageRecord objects.
+        aux:      Adversary auxiliary knowledge. Must contain ``pre_snapshot``
+                  (list of Document objects prior to mu0).
+        equality: EqualityResult containing query groupings.
+        mu0:      Logical timestamp cutoff for the proxy query selection.
+        window:   Absolute tolerance for |L[w] - a_q~|. Defaults to
+                  ``max(2, round(0.15 * a_q~))`` per query (relative window).
+
+    Returns:
+        Dict mapping ``query_id -> predicted keyword`` (or ``None`` when
+        unresolved). Every query_id is present.
+    """
+    from collections import defaultdict
+
+    if mu0 is None:
+        mu0 = getattr(aux, "mu0", 0)
+
+    predictions = {rec.query_id: None for rec in records}
+
+    if not records or aux.pre_snapshot is None:
+        return predictions
+
+    rec_map = {r.query_id: r for r in records}
+    snapshot_docs = aux.pre_snapshot
+
+    # Build L[w] from the snapshot
+    L = defaultdict(int)
+    vocab_set = set()
+    for doc in snapshot_docs:
+        kws = doc.keywords if hasattr(doc, "keywords") else set()
+        for w in kws:
+            L[w] += 1
+            vocab_set.add(w)
+
+    vocab = sorted(vocab_set)
+    if not vocab:
+        return predictions
+
+    # gid -> {keyword: vote_count}, gid -> {keyword: cumulative_distance}
+    group_votes = defaultdict(lambda: defaultdict(int))
+    group_dist  = defaultdict(lambda: defaultdict(float))
+    group_qids  = defaultdict(list)
+
+    for q in records:
+        gid = equality.group_of.get(q.query_id)
+        if gid is None:
+            gid = q.query_id  # singleton group
+        group_qids[gid].append(q.query_id)
+
+        if gid in equality.groups:
+            linked_recs = [rec_map[qid] for qid in equality.groups[gid] if qid in rec_map]
+        else:
+            linked_recs = [q]
+
+        after_mu0 = [r for r in linked_recs if r.timestamp >= mu0]
+        q_tilde = min(after_mu0, key=lambda r: (r.timestamp - mu0, r.query_id))                   if after_mu0 else q
+
+        a_q_tilde = int(round((q_tilde.ulen + q_tilde.rlen) / 2.0))
+
+        # Per-query tolerance window
+        th = float(window) if window is not None else max(2.0, round(0.15 * a_q_tilde))
+
+        for w in vocab:
+            dist = abs(L[w] - a_q_tilde)
+            if dist <= th:
+                group_votes[gid][w] += 1
+            group_dist[gid][w] += dist
+
+    # Resolve each group to the keyword with the most votes
+    group_resolved = {}
+    for gid, votes in group_votes.items():
+        if not votes:
+            continue
+        max_votes = max(votes.values())
+        top_kws = [w for w, v in votes.items() if v == max_votes]
+        if len(top_kws) == 1:
+            group_resolved[gid] = top_kws[0]
+        else:
+            # Break ties by smallest cumulative distance to a_q~
+            group_resolved[gid] = min(top_kws, key=lambda w: group_dist[gid][w])
+
+    # Assign resolved keyword to every query in the group
+    for q in records:
+        gid = equality.group_of.get(q.query_id)
+        if gid is None:
+            gid = q.query_id
+        if gid in group_resolved:
+            predictions[q.query_id] = group_resolved[gid]
+
+    return predictions

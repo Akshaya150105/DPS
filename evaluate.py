@@ -15,15 +15,21 @@ from typing import Any
 def accuracy(
     predictions: dict[int, str | None],
     ground_truth: dict[int, str],
+    records: list[Any] | None = None,
 ) -> float:
     """Compute the fraction of queries predicted correctly.
 
     A prediction of ``None`` always counts as wrong.  Query ids present in
     *ground_truth* but missing from *predictions* are also counted as wrong.
 
+    When *records* is provided or when *ground_truth* carries a
+    ``sampled_query_ids`` set, accuracy is computed only on the sampled
+    queries, ignoring insertion-probe records (``is_probe=True``).
+
     Args:
         predictions:  Dict mapping query_id -> predicted keyword (or ``None``).
         ground_truth: Dict mapping query_id -> true keyword string.
+        records:      Optional list of :class:`~types_.LeakageRecord` objects.
 
     Returns:
         Float in [0.0, 1.0].  Returns 1.0 when *ground_truth* is empty
@@ -32,10 +38,22 @@ def accuracy(
     if not ground_truth:
         return 1.0
 
-    correct = 0
-    total   = len(ground_truth)
+    if records is not None:
+        probe_qids = {r.query_id for r in records if getattr(r, "is_probe", False)}
+        eval_qids = [qid for qid in ground_truth if qid not in probe_qids]
+    elif hasattr(ground_truth, "sampled_query_ids") and ground_truth.sampled_query_ids is not None:
+        eval_qids = [qid for qid in ground_truth if qid in ground_truth.sampled_query_ids]
+    else:
+        eval_qids = list(ground_truth.keys())
 
-    for qid, true_kw in ground_truth.items():
+    if not eval_qids:
+        return 1.0
+
+    correct = 0
+    total = len(eval_qids)
+
+    for qid in eval_qids:
+        true_kw = ground_truth.get(qid)
         predicted = predictions.get(qid)   # None if missing
         if predicted is not None and predicted == true_kw:
             correct += 1

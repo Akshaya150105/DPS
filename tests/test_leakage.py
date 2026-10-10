@@ -255,3 +255,70 @@ class TestMuCutoff:
         assert leakage.ulen(events, "k", mu=100) == 0
         assert leakage.ilen(events, "k", mu=100) == 0
         assert leakage.dlen(events, "k", mu=100) == 0
+
+
+# ---------------------------------------------------------------------------
+# 6. Observation 2: Backward-privacy types leak the same volume
+# ---------------------------------------------------------------------------
+
+def type_i_leakage(events: list[Event], w: str, mu: int) -> tuple[int, int]:
+    """Type-I backward privacy reveals (u, n): update length u and response length n."""
+    u = leakage.ulen(events, w, mu)
+    n = leakage.rlen(events, w, mu)
+    return u, n
+
+
+def type_ii_leakage(events: list[Event], w: str, mu: int) -> tuple[int, int]:
+    """Type-II backward privacy reveals (n, u): response length n and update length u."""
+    n = leakage.rlen(events, w, mu)
+    u = leakage.ulen(events, w, mu)
+    return n, u
+
+
+def type_iii_leakage(events: list[Event], w: str, mu: int) -> tuple[int, int]:
+    """Type-III backward privacy reveals (n, d): response length n and deletion count d."""
+    n = leakage.rlen(events, w, mu)
+    d = leakage.dlen(events, w, mu)
+    return n, d
+
+
+class TestObservation2BackwardPrivacy:
+    """Verify Observation 2 from CCS 2023: all three backward-privacy types leak identical volume.
+
+    Observation 2:
+      Type-I reveals (u, n), Type-II reveals (n, u), and Type-III reveals (n, d).
+      From the leakage algebra:
+        - Type-I:  (u, n) -> a = (u + n)/2, d = (u - n)/2  (via derive_insert_delete)
+        - Type-II: (n, u) -> a = (u + n)/2, d = (u - n)/2  (via derive_insert_delete)
+        - Type-III: (n, d) -> a = n + d,     d = d          (via derive_from_n_d)
+      Because n = a - d and u = a + d, each observable pair forms an invertible linear
+      system in (a, d). Thus all three backward-privacy definitions leak the exact same
+      insertion count a and deletion count d for any query.
+    """
+
+    @pytest.mark.parametrize("seed", range(20))
+    def test_all_three_types_yield_identical_a_d(self, seed: int) -> None:
+        """Deriving (a, d) from Type-I, Type-II, and Type-III leakages gives identical results."""
+        rng = make_rng(seed + 300)
+        events, a_true, d_true = build_random_log(rng)
+        mu = max(e.mu for e in events)
+
+        # Type-I: returns (u, n)
+        u1, n1 = type_i_leakage(events, "kw", mu)
+        a_type_i, d_type_i = leakage.derive_insert_delete(u1, n1)
+
+        # Type-II: returns (n, u)
+        n2, u2 = type_ii_leakage(events, "kw", mu)
+        a_type_ii, d_type_ii = leakage.derive_insert_delete(u2, n2)
+
+        # Type-III: returns (n, d)
+        n3, d3 = type_iii_leakage(events, "kw", mu)
+        a_type_iii, _ = leakage.derive_from_n_d(n3, d3)
+        d_type_iii = d3
+
+        # Assert all three types yield identical (a, d) matching the ground truth
+        assert (a_type_i, d_type_i) == (a_type_ii, d_type_ii) == (a_type_iii, d_type_iii) == (a_true, d_true), (
+            f"seed={seed}: Mismatch between backward-privacy types: "
+            f"Type-I={(a_type_i, d_type_i)}, Type-II={(a_type_ii, d_type_ii)}, "
+            f"Type-III={(a_type_iii, d_type_iii)}, ground_truth={(a_true, d_true)}"
+        )

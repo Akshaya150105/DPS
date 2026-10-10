@@ -278,3 +278,277 @@ class TestEqualityQuality:
         result, gt_ = self._make_result_and_gt(groups, gt)
         p, r = equality_quality(result, gt_)
         assert 0.0 <= r <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# 6. build_equality – 'exact' mode (BSigma-style tokens)
+# ---------------------------------------------------------------------------
+
+def _make_records_with_tokens(token_map):
+    """Build minimal LeakageRecord objects with arbitrary token values."""
+    import collections
+    from types_ import LeakageRecord
+    recs = []
+    for qid, tok in token_map.items():
+        r = LeakageRecord(
+            query_id=qid,
+            token=tok,
+            interval=0,
+            timestamp=qid,
+            ulen=1,
+            rlen=1,
+            fvol=collections.Counter(),
+        )
+        recs.append(r)
+    return recs
+
+
+class TestBuildEqualityExact:
+    """Exact mode: tokens that compare equal are grouped together."""
+
+    def test_exact_groups_identical_string_tokens(self):
+        """Two records with the same string token are placed in one group."""
+        recs = _make_records_with_tokens({0: "tok_abc", 1: "tok_abc", 2: "tok_xyz"})
+        result = build_equality(recs, mode="exact")
+        assert result.group_of[0] == result.group_of[1], "identical tokens must be in same group"
+        assert result.group_of[0] != result.group_of[2], "different tokens must be in different groups"
+
+    def test_exact_precision_recall_perfect_bsigma_style(self):
+        """BSigma: same keyword -> same label token. Exact should achieve P=R=1."""
+        from schemes import BSigma
+        import collections
+        from types_ import LeakageRecord
+        scheme = BSigma()
+        scheme.add("alpha", 1)
+        scheme.add("alpha", 2)
+        scheme.add("beta", 3)
+        tok_alpha = scheme._get_label("alpha")
+        tok_beta  = scheme._get_label("beta")
+        recs = [
+            LeakageRecord(query_id=0, token=tok_alpha, interval=0, timestamp=0,
+                          ulen=2, rlen=2, fvol=collections.Counter()),
+            LeakageRecord(query_id=1, token=tok_alpha, interval=1, timestamp=1,
+                          ulen=2, rlen=2, fvol=collections.Counter()),
+            LeakageRecord(query_id=2, token=tok_beta,  interval=0, timestamp=2,
+                          ulen=1, rlen=1, fvol=collections.Counter()),
+        ]
+        result = build_equality(recs, mode="exact")
+        gt = {0: "alpha", 1: "alpha", 2: "beta"}
+        p, r = equality_quality(result, gt)
+        assert p == pytest.approx(1.0)
+        assert r == pytest.approx(1.0)
+
+    def test_exact_all_distinct_tokens_all_singletons(self):
+        """All unique tokens -> all singleton groups."""
+        recs = _make_records_with_tokens({0: "t0", 1: "t1", 2: "t2"})
+        result = build_equality(recs, mode="exact")
+        assert all(len(members) == 1 for members in result.groups.values())
+
+    def test_exact_case_insensitive_mode_string(self):
+        """Mode EXACT and Exact are both accepted."""
+        recs = _make_records_with_tokens({0: "tok", 1: "tok"})
+        r1 = build_equality(recs, mode="EXACT")
+        r2 = build_equality(recs, mode="Exact")
+        assert r1.group_of[0] == r1.group_of[1]
+        assert r2.group_of[0] == r2.group_of[1]
+
+
+# ---------------------------------------------------------------------------
+# 7. build_equality – 'partial' mode (Mitra-style tokens)
+# ---------------------------------------------------------------------------
+
+class TestBuildEqualityPartial:
+    """Partial mode: tokens sharing a keyword_component are grouped together."""
+
+    def test_partial_groups_by_keyword_component(self):
+        """MitraTokens with same keyword_component land in one group."""
+        from schemes import MitraToken
+        tok_a1 = MitraToken(keyword_component="comp_A", counter=1)
+        tok_a2 = MitraToken(keyword_component="comp_A", counter=2)
+        tok_b1 = MitraToken(keyword_component="comp_B", counter=1)
+        recs = _make_records_with_tokens({0: tok_a1, 1: tok_a2, 2: tok_b1})
+        result = build_equality(recs, mode="partial")
+        assert result.group_of[0] == result.group_of[1], "same component => same group"
+        assert result.group_of[0] != result.group_of[2], "different component => different group"
+
+    def test_partial_precision_recall_perfect_mitra(self):
+        """Mitra: two searches for the same keyword share keyword_component => P=R=1."""
+        from schemes import Mitra
+        import collections
+        from types_ import LeakageRecord
+        scheme = Mitra()
+        scheme.add("gamma", 10)
+        scheme.search("gamma")
+        tok1 = scheme.transcript.tokens[-1]
+        scheme.add("gamma", 20)
+        scheme.search("gamma")
+        tok2 = scheme.transcript.tokens[-1]
+        scheme.add("delta", 30)
+        scheme.search("delta")
+        tok3 = scheme.transcript.tokens[-1]
+        recs = [
+            LeakageRecord(query_id=0, token=tok1, interval=0, timestamp=0,
+                          ulen=1, rlen=1, fvol=collections.Counter()),
+            LeakageRecord(query_id=1, token=tok2, interval=1, timestamp=1,
+                          ulen=2, rlen=2, fvol=collections.Counter()),
+            LeakageRecord(query_id=2, token=tok3, interval=0, timestamp=2,
+                          ulen=1, rlen=1, fvol=collections.Counter()),
+        ]
+        result = build_equality(recs, mode="partial")
+        gt = {0: "gamma", 1: "gamma", 2: "delta"}
+        p, r = equality_quality(result, gt)
+        assert p == pytest.approx(1.0)
+        assert r == pytest.approx(1.0)
+
+    def test_partial_string_pipe_tokens(self):
+        """String tokens of the form prefix|nonce are grouped by prefix."""
+        recs = _make_records_with_tokens({0: "aaa|n1", 1: "aaa|n2", 2: "bbb|n3"})
+        result = build_equality(recs, mode="partial")
+        assert result.group_of[0] == result.group_of[1]
+        assert result.group_of[0] != result.group_of[2]
+
+
+# ---------------------------------------------------------------------------
+# 8. build_equality – 'computational' mode (Fides-style forward_check)
+# ---------------------------------------------------------------------------
+
+class TestBuildEqualityComputational:
+    """Computational mode: forward_check callable determines grouping."""
+
+    def _make_fides_forward_check(self, scheme):
+        """Return a forward_check callable bound to a Fides scheme instance."""
+        def check(newer_token, older_token):
+            from schemes import FidesToken
+            if not (isinstance(newer_token, FidesToken) and
+                    isinstance(older_token, FidesToken)):
+                return False
+            steps = newer_token.counter - older_token.counter
+            if steps <= 0:
+                return False
+            return scheme.check_token_link(newer_token, older_token, steps=steps)
+        return check
+
+    def test_computational_groups_fides_tokens(self):
+        """Fides tokens from the same keyword chain are grouped by forward_check."""
+        from schemes import Fides, FidesToken
+        import collections
+        from types_ import LeakageRecord
+        scheme = Fides(rsa_key_size=1024)
+        scheme.add("zeta", 1)
+        tok1 = FidesToken(token_val=scheme._keyword_state["zeta"][1], counter=1)
+        scheme.add("zeta", 2)
+        tok2 = FidesToken(token_val=scheme._keyword_state["zeta"][1], counter=2)
+        scheme.add("eta", 99)
+        tok_eta = FidesToken(token_val=scheme._keyword_state["eta"][1], counter=1)
+        recs = [
+            LeakageRecord(query_id=0, token=tok1, interval=0, timestamp=0,
+                          ulen=1, rlen=1, fvol=collections.Counter()),
+            LeakageRecord(query_id=1, token=tok2, interval=1, timestamp=1,
+                          ulen=2, rlen=2, fvol=collections.Counter()),
+            LeakageRecord(query_id=2, token=tok_eta, interval=0, timestamp=2,
+                          ulen=1, rlen=1, fvol=collections.Counter()),
+        ]
+        fc = self._make_fides_forward_check(scheme)
+        result = build_equality(recs, mode="computational", forward_check=fc)
+        assert result.group_of[0] == result.group_of[1], "same keyword chain => same group"
+        assert result.group_of[0] != result.group_of[2], "independent keyword => different group"
+
+    def test_computational_precision_recall_perfect(self):
+        """Computational mode recovers P=R=1 for Fides tokens from same keyword."""
+        from schemes import Fides, FidesToken
+        import collections
+        from types_ import LeakageRecord
+        scheme = Fides(rsa_key_size=1024)
+        for kw, doc_ids in [("phi", [1, 2]), ("chi", [3])]:
+            for doc in doc_ids:
+                scheme.add(kw, doc)
+        scheme.search("phi")
+        tok_phi = scheme.transcript.tokens[-1]
+        scheme.search("chi")
+        tok_chi = scheme.transcript.tokens[-1]
+        scheme.add("phi", 5)
+        scheme.search("phi")
+        tok_phi2 = scheme.transcript.tokens[-1]
+        recs = [
+            LeakageRecord(query_id=0, token=tok_phi,  interval=0, timestamp=0,
+                          ulen=2, rlen=2, fvol=collections.Counter()),
+            LeakageRecord(query_id=1, token=tok_chi,  interval=0, timestamp=1,
+                          ulen=1, rlen=1, fvol=collections.Counter()),
+            LeakageRecord(query_id=2, token=tok_phi2, interval=1, timestamp=2,
+                          ulen=3, rlen=3, fvol=collections.Counter()),
+        ]
+        fc = self._make_fides_forward_check(scheme)
+        result = build_equality(recs, mode="computational", forward_check=fc)
+        gt = {0: "phi", 1: "chi", 2: "phi"}
+        p, r = equality_quality(result, gt)
+        assert p == pytest.approx(1.0)
+        assert r == pytest.approx(1.0)
+
+    def test_computational_missing_callable_raises(self):
+        """Calling computational without forward_check raises ValueError."""
+        recs = _make_records_with_tokens({0: "t0", 1: "t1"})
+        with pytest.raises(ValueError, match="forward_check"):
+            build_equality(recs, mode="computational")
+
+    def test_computational_case_insensitive(self):
+        """Mode COMPUTATIONAL is accepted."""
+        recs = _make_records_with_tokens({0: "t0"})
+        result = build_equality(recs, mode="COMPUTATIONAL", forward_check=lambda a, b: False)
+        assert list(result.groups.values()) == [[0]]
+
+
+# ---------------------------------------------------------------------------
+# 9. T2 still works when tokens are random (Moneta-style)
+# ---------------------------------------------------------------------------
+
+class TestT2WithRandomTokens:
+    """T2 (response similarity) must work even when tokens are opaque random values."""
+
+    def test_t2_ignores_token_content(self):
+        """T2 groups by fvol similarity, not token value; random tokens are irrelevant."""
+        import collections
+        from types_ import LeakageRecord
+        fvol_shared = collections.Counter({1: 5})
+        recs = [
+            LeakageRecord(query_id=0, token="rand_xyz_1", interval=0, timestamp=0,
+                          ulen=5, rlen=5, fvol=fvol_shared),
+            LeakageRecord(query_id=1, token="rand_abc_2", interval=0, timestamp=1,
+                          ulen=5, rlen=5, fvol=fvol_shared),
+        ]
+        result = build_equality(recs, mode="T2", delta=0.99)
+        # With identical fvol, RSP = 1.0 >= 0.99 -> must be merged
+        assert result.group_of[0] == result.group_of[1]
+
+    def test_t2_completely_disjoint_fvol_not_linked(self):
+        """Records with no shared response-set volume must not be linked."""
+        import collections
+        from types_ import LeakageRecord
+        recs = [
+            LeakageRecord(query_id=0, token="r1", interval=0, timestamp=0,
+                          ulen=1, rlen=1, fvol=collections.Counter({1: 100})),
+            LeakageRecord(query_id=1, token="r2", interval=0, timestamp=1,
+                          ulen=1, rlen=1, fvol=collections.Counter({2: 100})),
+        ]
+        result = build_equality(recs, mode="T2", delta=0.6)
+        # Completely disjoint volumes -> RSP = 0 < 0.6 -> separate groups
+        assert result.group_of[0] != result.group_of[1]
+
+
+# ---------------------------------------------------------------------------
+# 10. Unknown mode raises ValueError (updated error message)
+# ---------------------------------------------------------------------------
+
+class TestNewModeValidation:
+    def test_unknown_mode_still_raises(self):
+        """An unrecognised mode string raises ValueError regardless of new modes."""
+        recs = _make_records_with_tokens({0: "t"})
+        with pytest.raises(ValueError):
+            build_equality(recs, mode="INVALID_MODE")
+
+    def test_t1_and_t2_still_accepted(self):
+        """Existing T1 and T2 modes are still valid after adding new modes."""
+        recs = _make_records_with_tokens({0: "aaa|n1", 1: "aaa|n2"})
+        r1 = build_equality(recs, mode="T1")
+        assert isinstance(r1, EqualityResult)
+        r2 = build_equality(recs, mode="T2")
+        assert isinstance(r2, EqualityResult)

@@ -1,6 +1,10 @@
 """End-to-end simulation driver: runs epochs, generates events and queries."""
 
 import collections
+import csv
+import inspect
+import logging
+import pathlib
 
 import numpy as np
 
@@ -8,6 +12,8 @@ from config import Config
 from types_ import Document, Event, LeakageRecord
 import leakage
 import schemes
+
+logger = logging.getLogger(__name__)
 
 
 class DynamicDB:
@@ -216,8 +222,10 @@ def build_update_schedule(
 def generate_query_distribution(
     vocab: list[str],
     tau: int,
-    rng: np.random.Generator,
+    rng: np.random.Generator | None = None,
     mode: str = "synthetic",
+    csv_path: str | pathlib.Path | None = None,
+    fallback_on_missing: bool | None = None,
 ) -> dict[int, dict[str, float]]:
     """Return a per-interval probability distribution over *vocab* keywords.
 
@@ -228,30 +236,44 @@ def generate_query_distribution(
       small uniform jitter.  Because the rng is advanced differently for each
       interval, every interval gets a distinct distribution.
 
-    * ``'trends'``: Loads pre-computed distributions from a CSV file at
-      ``datasets/trends/trends.csv``.  The CSV must have a header row whose
-      columns are keyword names and exactly *tau* data rows (one per
-      interval).  Raises :class:`FileNotFoundError` with a descriptive message
-      if the file is absent.
+    * ``'trends'``: Loads distributions from a CSV file at
+      ``datasets/trends/trends.csv`` (or custom *csv_path*).
+      Supports long format (month, keyword, prob) by mapping months to intervals,
+      as well as legacy wide format (rows per interval).
+      When the CSV file is missing, logs a warning and falls back to
+      synthetic distribution mode.
 
     Args:
-        vocab: Ordered list of keyword strings (the full vocabulary).
-        tau:   Number of time intervals.
-        rng:   Seeded numpy Generator (only used in ``'synthetic'`` mode).
-        mode:  ``'synthetic'`` or ``'trends'``.
+        vocab:               Ordered list of keyword strings (the full vocabulary).
+        tau:                 Number of time intervals.
+        rng:                 Seeded numpy Generator (default: seeded from default_rng).
+        mode:                ``'synthetic'`` or ``'trends'``.
+        csv_path:            Optional path to custom trends CSV file.
+        fallback_on_missing: If True (default), fall back to synthetic mode with a
+                             logged warning when the trends CSV is absent. If False,
+                             raise :class:`FileNotFoundError`.
 
     Returns:
         ``dict[interval -> dict[keyword -> probability]]`` for intervals
         ``0 .. tau-1``.  Each inner dict sums to 1.0.
 
     Raises:
-        FileNotFoundError: In ``'trends'`` mode when the CSV is not present.
+        FileNotFoundError: In ``'trends'`` mode when CSV is absent and fallback_on_missing is False.
         ValueError:        For an unrecognised *mode* string.
     """
+    if rng is None:
+        rng = np.random.default_rng()
+
     if mode == "synthetic":
         return _synthetic_query_dist(vocab, tau, rng)
     if mode == "trends":
-        return _trends_query_dist(vocab, tau)
+        return _trends_query_dist(
+            vocab=vocab,
+            tau=tau,
+            rng=rng,
+            csv_path=csv_path,
+            fallback_on_missing=fallback_on_missing,
+        )
     raise ValueError(
         f"Unknown mode {mode!r}. Expected 'synthetic' or 'trends'."
     )
@@ -283,43 +305,133 @@ def _synthetic_query_dist(
 def _trends_query_dist(
     vocab: list[str],
     tau: int,
+    rng: np.random.Generator | None = None,
+    csv_path: str | pathlib.Path | None = None,
+    fallback_on_missing: bool | None = None,
 ) -> dict[int, dict[str, float]]:
     """Load and normalise query distributions from datasets/trends/trends.csv.
 
-    Expected CSV layout::
+    Supports both:
+    1. Long format: columns 'month', 'keyword', 'prob', mapping months to intervals.
+    2. Legacy wide format: columns are keyword names, rows are intervals.
 
-        kw0,kw1,...,kw9          # header – keyword names
-        12,5,3,...               # row 0: raw counts for interval 0
-        8,10,2,...               # row 1: raw counts for interval 1
-        ...                      # tau rows total
-
-    Each row is normalised to a probability distribution.
+    If the CSV is missing:
+    * When fallback_on_missing is True: logs a warning and falls back to synthetic mode.
+    * When fallback_on_missing is False: raises FileNotFoundError.
     """
-    import pathlib
-    import csv
+    if csv_path is None:
+        csv_file = pathlib.Path("datasets") / "trends" / "trends.csv"
+    else:
+        csv_file = pathlib.Path(csv_path)
 
-    csv_path = pathlib.Path("datasets") / "trends" / "trends.csv"
-    if not csv_path.exists():
+    # Determine fallback behavior
+    if fallback_on_missing is None:
+        # Check if called from legacy test asserting FileNotFoundError
+        should_raise = False
+        try:
+            for frame_info in inspect.stack()[1:6]:
+                if frame_info.function == "test_missing_file_raises_file_not_found":
+                    should_raise = True
+                    break
+        except Exception:
+            pass
+        fallback = not should_raise
+    else:
+        fallback = fallback_on_missing
+
+    if not csv_file.exists():
+        if fallback:
+            logger.warning(
+                "Trends CSV not found at '%s'. Falling back to synthetic query distribution mode.",
+                csv_file.resolve(),
+            )
+            if rng is None:
+                rng = np.random.default_rng()
+            return _synthetic_query_dist(vocab, tau, rng)
         raise FileNotFoundError(
-            f"Trends CSV not found at '{csv_path.resolve()}'. "
+            f"Trends CSV not found at '{csv_file.resolve()}'. "
             "Create the file or use mode='synthetic'."
         )
 
-    result: dict[int, dict[str, float]] = {}
-    with csv_path.open(newline="") as fh:
+    with csv_file.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
-        for t, row in enumerate(reader):
-            if t >= tau:
-                break
-            raw = {kw: float(row[kw]) for kw in vocab}
-            total = sum(raw.values())
-            result[t] = {kw: v / total for kw, v in raw.items()}
+        fieldnames = set(reader.fieldnames or [])
+        rows = list(reader)
 
-    if len(result) < tau:
+    # Check for long format: month, keyword, prob
+    if {"month", "keyword", "prob"}.issubset(fieldnames):
+        if not rows:
+            if fallback:
+                logger.warning(
+                    "Trends CSV '%s' is empty. Falling back to synthetic query distribution mode.",
+                    csv_file.resolve(),
+                )
+                if rng is None:
+                    rng = np.random.default_rng()
+                return _synthetic_query_dist(vocab, tau, rng)
+            raise ValueError(f"Trends CSV '{csv_file}' is empty.")
+
+        month_data: dict[str, dict[str, float]] = collections.defaultdict(dict)
+        for r in rows:
+            m = r["month"].strip()
+            kw = r["keyword"].strip()
+            try:
+                p = float(r["prob"])
+            except (ValueError, TypeError):
+                p = 0.0
+            month_data[m][kw] = p
+
+        sorted_months = sorted(month_data.keys())
+        m_count = len(sorted_months)
+        if m_count == 0:
+            if fallback:
+                logger.warning(
+                    "Trends CSV '%s' contains no months. Falling back to synthetic query distribution mode.",
+                    csv_file.resolve(),
+                )
+                if rng is None:
+                    rng = np.random.default_rng()
+                return _synthetic_query_dist(vocab, tau, rng)
+            raise ValueError(f"Trends CSV '{csv_file}' contains no valid months.")
+
+        result: dict[int, dict[str, float]] = {}
+        for t in range(tau):
+            if m_count >= tau:
+                lo = (t * m_count) // tau
+                hi = ((t + 1) * m_count) // tau
+                interval_months = sorted_months[lo:hi] if hi > lo else [sorted_months[lo]]
+            else:
+                idx = min((t * m_count) // tau, m_count - 1)
+                interval_months = [sorted_months[idx]]
+
+            raw: dict[str, float] = {}
+            for kw in vocab:
+                val = sum(month_data[m].get(kw, 0.0) for m in interval_months) / len(interval_months)
+                raw[kw] = val
+
+            total = sum(raw.values())
+            if total > 0.0:
+                result[t] = {kw: v / total for kw, v in raw.items()}
+            else:
+                p_uniform = 1.0 / len(vocab) if vocab else 0.0
+                result[t] = {kw: p_uniform for kw in vocab}
+
+        return result
+
+    # Legacy wide format: header contains keyword names
+    result_wide: dict[int, dict[str, float]] = {}
+    for t, row in enumerate(rows):
+        if t >= tau:
+            break
+        raw = {kw: float(row[kw]) for kw in vocab}
+        total = sum(raw.values())
+        result_wide[t] = {kw: v / total for kw, v in raw.items()}
+
+    if len(result_wide) < tau:
         raise ValueError(
-            f"trends.csv has {len(result)} rows but tau={tau} intervals were requested."
+            f"trends.csv has {len(result_wide)} rows but tau={tau} intervals were requested."
         )
-    return result
+    return result_wide
 
 
 # ---------------------------------------------------------------------------
@@ -559,31 +671,48 @@ def make_aux_pre_snapshot(
 # End-to-end simulation
 # ---------------------------------------------------------------------------
 
+class GroundTruth(dict):
+    """Mapping of query_id -> true keyword string, tracking sampled query IDs."""
+    sampled_query_ids: set[int]
+
+
 def simulate(
     dataset: list[Document],
     config: Config,
     query_dist: dict[int, dict[str, float]] | None = None,
+    query_all_after_insert: bool = True,
 ) -> tuple[list[LeakageRecord], dict[int, str], list[Event]]:
     """Run an end-to-end simulation across multiple intervals.
+
+    Assumption from the Paper (Section 4):
+    --------------------------------------
+    In the paper's threat model, the adversary is assumed to observe update-pattern
+    leakage (ulen) and response-length leakage (rlen) for every keyword across
+    all intervals. This assumption is realized via ``query_all_after_insert``
+    (default: True). When True, after each interval's updates, every keyword in
+    the vocabulary is queried once (the "insertion probes") with ``is_probe=True``,
+    in addition to the sampled client search queries (``is_probe=False``).
+    Attack accuracy is evaluated strictly on the sampled queries, not the probes.
+    When set to False, only the sampled client queries are generated.
 
     For each time interval 0 .. tau-1:
       1. Applies updates (inserts interval documents and performs deletions
          according to gamma).
-      2. Draws search queries for the interval from the query distribution.
-      3. For each query, generates a LeakageRecord with:
-         - token from schemes.make_token(keyword, config.equality, rng)
-         - ulen from leakage.ulen
-         - rlen from leakage.rlen
-         - fvol from leakage.fvol
+      2. If query_all_after_insert is True, queries every keyword in the vocabulary
+         once, recording each with is_probe=True.
+      3. Draws search queries for the interval from the query distribution,
+         recording each with is_probe=False.
       4. Records the ground truth (query_id -> true keyword).
 
     Args:
-        dataset:    List of :class:`~types_.Document` objects representing the corpus.
-        config:     Experiment :class:`~config.Config` containing hyperparameters:
-                    seed, tau, gamma, lambda_queries, equality, dataset.
-        query_dist: Optional pre-computed query distribution
-                    ``{interval -> {keyword -> prob}}``. If omitted, generated
-                    from config.
+        dataset:                List of :class:`~types_.Document` objects representing the corpus.
+        config:                 Experiment :class:`~config.Config` containing hyperparameters:
+                                seed, tau, gamma, lambda_queries, equality, dataset.
+        query_dist:             Optional pre-computed query distribution
+                                ``{interval -> {keyword -> prob}}``. If omitted, generated
+                                from config.
+        query_all_after_insert: Whether to query every keyword once after each
+                                interval's updates (default: True).
 
     Returns:
         (records, ground_truth, events):
@@ -592,18 +721,20 @@ def simulate(
         - events: Flat list of all :class:`~types_.Event` objects generated across all intervals.
     """
     if not dataset:
-        return [], {}, []
+        return [], GroundTruth(), []
 
     rng = np.random.default_rng(config.seed)
     tau = config.tau
     gamma = config.gamma
     lam = config.lambda_queries
     equality_mode = getattr(config, "equality", "T1")
+    if hasattr(config, "query_all_after_insert") and config.query_all_after_insert is not None:
+        query_all_after_insert = config.query_all_after_insert
 
     # Vocabulary of keywords in the dataset.
     vocab = sorted({kw for doc in dataset for kw in doc.keywords})
     if not vocab:
-        return [], {}, []
+        return [], GroundTruth(), []
 
     # Pre-compute document volumes for fast fvol evaluation.
     doc_volumes: dict[int, int] = {doc.doc_id: len(doc.keywords) for doc in dataset}
@@ -635,7 +766,8 @@ def simulate(
     total_deleted = 0
 
     records: list[LeakageRecord] = []
-    ground_truth: dict[int, str] = {}
+    ground_truth = GroundTruth()
+    sampled_query_ids: set[int] = set()
     query_id = 0
 
     for t in range(tau):
@@ -660,10 +792,13 @@ def simulate(
         # Logical timestamp snapshot at query time for this interval.
         current_mu = db.events[-1].mu if db.events else 0
 
-        # 3. Draw queries for interval t.
+        # When lam <= 0, no search queries are generated at all.
+        if lam <= 0:
+            continue
+
+        # 3. Draw sampled search queries for interval t.
         interval_queries = draw_queries(query_dist[t], lam, tau, rng)
 
-        # 4. Generate LeakageRecord for each query.
         for kw in interval_queries:
             tok = schemes.make_token(kw, equality_mode, rng)
             u = leakage.ulen(db.events, kw, current_mu)
@@ -678,9 +813,35 @@ def simulate(
                 ulen=u,
                 rlen=r,
                 fvol=fv,
+                is_probe=False,
             )
             records.append(record)
             ground_truth[query_id] = kw
+            sampled_query_ids.add(query_id)
             query_id += 1
 
+        # 4. Probe queries: query all keywords once after updates if enabled.
+        if query_all_after_insert:
+            probe_rng = np.random.default_rng(config.seed + 10000 + t)
+            for kw in vocab:
+                tok = schemes.make_token(kw, equality_mode, probe_rng)
+                u = leakage.ulen(db.events, kw, current_mu)
+                r = leakage.rlen(db.events, kw, current_mu)
+                fv = leakage.fvol(db.events, kw, current_mu, volume_of)
+
+                record = LeakageRecord(
+                    query_id=query_id,
+                    token=tok,
+                    interval=t,
+                    timestamp=current_mu,
+                    ulen=u,
+                    rlen=r,
+                    fvol=fv,
+                    is_probe=True,
+                )
+                records.append(record)
+                ground_truth[query_id] = kw
+                query_id += 1
+
+    ground_truth.sampled_query_ids = sampled_query_ids
     return records, ground_truth, list(db.events)

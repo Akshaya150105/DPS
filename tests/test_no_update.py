@@ -131,3 +131,198 @@ class TestNoUpdateFallback:
         """When mu0 = 0, all queries have timestamp >= mu0 and attack executes cleanly."""
         preds, _, records = _run_no_update(seed=42, lam=50.0, mu0=0)
         assert set(preds.keys()) == {r.query_id for r in records}
+
+
+# ---------------------------------------------------------------------------
+# 4. Tests for no_update_pvia (Section 6.3 Variant A)
+# ---------------------------------------------------------------------------
+
+def _run_no_update_pvia(
+    seed: int = 42,
+    tau: int = 3,
+    lam: float = 60.0,
+    gamma: float = 0.0,
+    mu0: int = 30,
+    alpha: float = 0.7,
+    equality_mode: str = "T1",
+):
+    """Simulate and run no_update_pvia on synthetic data."""
+    from simulator import make_aux_pre_snapshot, simulate
+    docs = make_synthetic(seed=seed)
+    cfg = Config(
+        seed=seed,
+        tau=tau,
+        lambda_queries=lam,
+        gamma=gamma,
+        equality=equality_mode,
+    )
+    records, gt, _ = simulate(docs, cfg)
+    eq = build_equality(records, mode=equality_mode)
+    snapshot = make_aux_pre_snapshot(docs, mu0=mu0)
+    aux = Aux(pre_snapshot=snapshot)
+    preds = no_update.no_update_pvia(records, aux, eq, alpha=alpha, mu0=mu0)
+    return preds, gt, records
+
+
+class TestNoUpdatePvia:
+    def test_returns_prediction_for_every_query(self):
+        """no_update_pvia must return an entry for every query on synthetic data."""
+        preds, _, records = _run_no_update_pvia(seed=42, lam=60.0, mu0=30, alpha=0.7)
+        assert len(records) > 0, "Simulation produced no queries."
+        assert len(preds) == len(records), (
+            f"Expected {len(records)} entries, got {len(preds)}"
+        )
+        assert set(preds.keys()) == {r.query_id for r in records}
+
+    def test_all_query_ids_present_across_seeds(self):
+        """Every query_id must be present across diverse seeds."""
+        for seed in [0, 1, 7, 99]:
+            preds, _, records = _run_no_update_pvia(seed=seed, lam=50.0, mu0=20, alpha=0.5)
+            assert set(preds.keys()) == {r.query_id for r in records}
+
+    def test_predictions_are_keywords_or_none(self):
+        """Values must be either valid keyword strings or None."""
+        preds, _, _ = _run_no_update_pvia(seed=42, lam=80.0, mu0=30, alpha=0.8)
+        for qid, pred in preds.items():
+            assert pred is None or isinstance(pred, str), (
+                f"Query {qid}: invalid prediction {pred!r}."
+            )
+
+    def test_alpha_1_covers_all_keywords(self):
+        """With alpha=1.0 the window is widest (alpha*L[w] <= a_q~); still returns all entries."""
+        preds, _, records = _run_no_update_pvia(seed=42, lam=60.0, mu0=30, alpha=1.0)
+        assert set(preds.keys()) == {r.query_id for r in records}
+
+    def test_invalid_alpha_raises(self):
+        """alpha outside (0, 1] must raise ValueError."""
+        from simulator import make_aux_pre_snapshot, simulate
+        docs = make_synthetic(seed=0)
+        cfg = Config(seed=0, tau=3, lambda_queries=40.0)
+        records, _, _ = simulate(docs, cfg)
+        eq = build_equality(records, mode="T1")
+        aux = Aux(pre_snapshot=make_aux_pre_snapshot(docs, mu0=20))
+        import pytest
+        with pytest.raises(ValueError):
+            no_update.no_update_pvia(records, aux, eq, alpha=0.0)
+        with pytest.raises(ValueError):
+            no_update.no_update_pvia(records, aux, eq, alpha=1.5)
+
+    def test_none_pre_snapshot_gives_all_none(self):
+        """When aux.pre_snapshot is None, all predictions must be None."""
+        from simulator import simulate
+        docs = make_synthetic(seed=0)
+        cfg = Config(seed=0, tau=3, lambda_queries=40.0)
+        records, _, _ = simulate(docs, cfg)
+        eq = build_equality(records, mode="T1")
+        aux = Aux(pre_snapshot=None)
+        preds = no_update.no_update_pvia(records, aux, eq, alpha=0.5, mu0=0)
+        assert all(v is None for v in preds.values())
+
+    def test_empty_records_returns_empty(self):
+        """Empty records -> empty prediction dict."""
+        from equality import EqualityResult
+        eq = EqualityResult()
+        aux = Aux(pre_snapshot=[])
+        assert no_update.no_update_pvia([], aux, eq, alpha=0.5) == {}
+
+    def test_large_mu0_runs_cleanly(self):
+        """mu0 beyond all timestamps still produces a prediction for every query."""
+        preds, _, records = _run_no_update_pvia(seed=42, lam=50.0, mu0=999_999, alpha=0.6)
+        assert set(preds.keys()) == {r.query_id for r in records}
+
+
+# ---------------------------------------------------------------------------
+# 5. Tests for no_update_lvia (Section 6.3 Variant B)
+# ---------------------------------------------------------------------------
+
+def _run_no_update_lvia(
+    seed: int = 42,
+    tau: int = 3,
+    lam: float = 60.0,
+    gamma: float = 0.0,
+    mu0: int = 30,
+    equality_mode: str = "T1",
+    window=None,
+):
+    """Simulate and run no_update_lvia on synthetic data."""
+    from simulator import make_aux_pre_snapshot, simulate
+    docs = make_synthetic(seed=seed)
+    cfg = Config(
+        seed=seed,
+        tau=tau,
+        lambda_queries=lam,
+        gamma=gamma,
+        equality=equality_mode,
+    )
+    records, gt, _ = simulate(docs, cfg)
+    eq = build_equality(records, mode=equality_mode)
+    snapshot = make_aux_pre_snapshot(docs, mu0=mu0)
+    aux = Aux(pre_snapshot=snapshot)
+    preds = no_update.no_update_lvia(records, aux, eq, mu0=mu0, window=window)
+    return preds, gt, records
+
+
+class TestNoUpdateLvia:
+    def test_returns_prediction_for_every_query(self):
+        """no_update_lvia must return an entry for every query on synthetic data."""
+        preds, _, records = _run_no_update_lvia(seed=42, lam=60.0, mu0=30)
+        assert len(records) > 0, "Simulation produced no queries."
+        assert len(preds) == len(records), (
+            f"Expected {len(records)} entries, got {len(preds)}"
+        )
+        assert set(preds.keys()) == {r.query_id for r in records}
+
+    def test_all_query_ids_present_across_seeds(self):
+        """Every query_id must be present across diverse seeds."""
+        for seed in [0, 1, 7, 99]:
+            preds, _, records = _run_no_update_lvia(seed=seed, lam=50.0, mu0=20)
+            assert set(preds.keys()) == {r.query_id for r in records}
+
+    def test_predictions_are_keywords_or_none(self):
+        """Values must be either valid keyword strings or None."""
+        preds, _, _ = _run_no_update_lvia(seed=42, lam=80.0, mu0=30)
+        for qid, pred in preds.items():
+            assert pred is None or isinstance(pred, str), (
+                f"Query {qid}: invalid prediction {pred!r}."
+            )
+
+    def test_none_pre_snapshot_gives_all_none(self):
+        """When aux.pre_snapshot is None, all predictions must be None."""
+        from simulator import simulate
+        docs = make_synthetic(seed=0)
+        cfg = Config(seed=0, tau=3, lambda_queries=40.0)
+        records, _, _ = simulate(docs, cfg)
+        eq = build_equality(records, mode="T1")
+        aux = Aux(pre_snapshot=None)
+        preds = no_update.no_update_lvia(records, aux, eq, mu0=0)
+        assert all(v is None for v in preds.values())
+
+    def test_empty_records_returns_empty(self):
+        """Empty records -> empty prediction dict."""
+        from equality import EqualityResult
+        eq = EqualityResult()
+        aux = Aux(pre_snapshot=[])
+        assert no_update.no_update_lvia([], aux, eq) == {}
+
+    def test_explicit_window_parameter_accepted(self):
+        """Passing an explicit window does not raise and covers all queries."""
+        preds, _, records = _run_no_update_lvia(seed=42, lam=50.0, mu0=20, window=5)
+        assert set(preds.keys()) == {r.query_id for r in records}
+
+    def test_large_window_resolves_more(self):
+        """A large window should resolve at least as many queries as a tight one."""
+        preds_tight, _, records = _run_no_update_lvia(seed=42, lam=60.0, mu0=30, window=1)
+        preds_wide,  _, _       = _run_no_update_lvia(seed=42, lam=60.0, mu0=30, window=100)
+        n_resolved_tight = sum(1 for v in preds_tight.values() if v is not None)
+        n_resolved_wide  = sum(1 for v in preds_wide.values()  if v is not None)
+        assert n_resolved_wide >= n_resolved_tight
+
+    def test_large_mu0_runs_cleanly(self):
+        """mu0 beyond all timestamps still produces a prediction for every query."""
+        preds, _, records = _run_no_update_lvia(seed=42, lam=50.0, mu0=999_999)
+        assert set(preds.keys()) == {r.query_id for r in records}
+
+    def test_mu0_zero_runs_cleanly(self):
+        """mu0=0 is valid; all queries have timestamp >= 0."""
+        preds, _, records = _run_no_update_lvia(seed=42, lam=50.0, mu0=0)
+        assert set(preds.keys()) == {r.query_id for r in records}

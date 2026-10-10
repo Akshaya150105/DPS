@@ -280,3 +280,59 @@ class TestCLI:
         captured = capsys.readouterr()
         assert "[DRY-RUN]" in captured.out
         assert "Total runs:" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# TestPatch19bGrids (Patch 19b: Full Experiment Grids)
+# ---------------------------------------------------------------------------
+
+class TestPatch19bGrids:
+    @pytest.mark.parametrize("attack", ["no_update_pvia", "no_update_lvia"])
+    def test_run_one_new_no_update_attacks(self, attack: str, tmp_path: pathlib.Path) -> None:
+        """run_one must execute no_update_pvia and no_update_lvia cleanly on synthetic data."""
+        csv_file = tmp_path / "results_no_update_variants.csv"
+        cfg = {
+            "dataset": "synthetic",
+            "attack": attack,
+            "equality": "T1",
+            "tau": 3,
+            "lambda": 40.0,
+            "gamma": 0.1,
+            "alpha": 0.5,
+            "eta": 0.5,
+            "noise": 0.0,
+            "seed": 42,
+        }
+        res = run_experiments.run_one(cfg, csv_path=csv_file)
+        assert isinstance(res, dict)
+        assert res["attack"] == attack
+        assert res["dataset"] == "synthetic"
+        assert 0.0 <= res["accuracy"] <= 1.0
+        assert res["correct"] <= res["total"]
+        assert res["total"] > 0
+        assert res["runtime_s"] >= 0.0
+
+    @pytest.mark.parametrize(
+        "filepath, expected_runs",
+        [
+            ("configs/fma_datasets.yaml", 16),
+            ("configs/pvia_datasets.yaml", 90),
+            ("configs/no_update_variants.yaml", 6),
+            ("grids/fma_datasets.yaml", 16),
+            ("grids/pvia_datasets.yaml", 90),
+            ("grids/no_update_variants.yaml", 6),
+        ],
+    )
+    def test_patch19b_grid_run_counts(self, filepath: str, expected_runs: int) -> None:
+        """Patch 19b YAML grids must exist and yield exact expected run counts on dry run."""
+        path = pathlib.Path(filepath)
+        assert path.exists(), f"Grid file {filepath} not found"
+        runs = run_experiments.run_grid(
+            grid=filepath,
+            n_seeds=1,
+            csv_path=None,
+            dry_run=True,
+            verbose=False,
+        )
+        assert len(runs) == expected_runs
+

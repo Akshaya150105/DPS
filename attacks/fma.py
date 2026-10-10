@@ -85,13 +85,16 @@ def run(
         if not dist:
             continue
 
-        total_queries = len(interval_records)
+        sampled_records = [r for r in interval_records if not getattr(r, "is_probe", False)]
+        eval_records = sampled_records if sampled_records else interval_records
+
+        total_queries = len(eval_records)
         if total_queries == 0:
             continue
 
         # Collect group members for this interval.
         gid_to_records: dict[int, list[LeakageRecord]] = defaultdict(list)
-        for rec in interval_records:
+        for rec in eval_records:
             gid = equality.group_of.get(rec.query_id)
             if gid is not None:
                 gid_to_records[gid].append(rec)

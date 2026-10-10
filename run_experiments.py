@@ -56,6 +56,13 @@ PAPER_GRIDS: dict[str, str] = {
     "lvia_s_vs_tau": "grids/lvia_s_vs_tau.yaml",
     "LVIA-S vs eta": "grids/lvia_s_vs_eta.yaml",
     "lvia_s_vs_eta": "grids/lvia_s_vs_eta.yaml",
+    # --- Patch 19b: full experiment grids ---
+    "FMA datasets": "grids/fma_datasets.yaml",
+    "fma_datasets": "grids/fma_datasets.yaml",
+    "PVIA datasets": "grids/pvia_datasets.yaml",
+    "pvia_datasets": "grids/pvia_datasets.yaml",
+    "No-update variants": "grids/no_update_variants.yaml",
+    "no_update_variants": "grids/no_update_variants.yaml",
 }
 
 
@@ -133,11 +140,21 @@ def load_dataset(
 
 def _normalize_attack_name(attack: str) -> str:
     """Normalize attack identifier to standard name."""
-    a = attack.strip().lower().replace("_", "-")
+    a = attack.strip().lower()
+    # Canonical form for lvia uses dashes (matches legacy CSV column values)
     if a in ("fma", "via", "pvia", "lvia-k", "lvia-s"):
         return a
+    # Underscore variants map back to dash form
+    if a == "lvia_k":
+        return "lvia-k"
+    if a == "lvia_s":
+        return "lvia-s"
     if a in ("no-update", "no_update", "noupdate"):
         return "no_update"
+    if a == "no_update_pvia":
+        return "no_update_pvia"
+    if a == "no_update_lvia":
+        return "no_update_lvia"
     return a
 
 
@@ -275,6 +292,34 @@ def run_one(
         aux = Aux(pre_snapshot=snapshot)
         preds = no_update.run(records, aux, eq, mu0=int(mu0))
 
+    elif attack_name == "no_update_pvia":
+        # Section 6.3 Variant A: partial snapshot PVIA without update knowledge.
+        # aux.pre_snapshot = the known alpha-fraction of the snapshot.
+        records, gt, events = simulate(docs, sim_cfg)
+        eq = build_equality(records, mode=equality_mode, delta=delta)
+        if mu0 is None:
+            mu0 = len(docs) // 2
+        valid_alpha = alpha if 0.0 < alpha <= 1.0 else 0.5
+        # Build the known fraction of the pre-snapshot (random sample of alpha * snapshot).
+        full_snapshot = make_aux_pre_snapshot(docs, mu0=int(mu0))
+        n_known = max(1, round(valid_alpha * len(full_snapshot)))
+        rng_snap = np.random.default_rng(seed + 77777)
+        idx = rng_snap.choice(len(full_snapshot), size=min(n_known, len(full_snapshot)), replace=False)
+        partial_snapshot = [full_snapshot[i] for i in sorted(idx)]
+        aux = Aux(pre_snapshot=partial_snapshot)
+        preds = no_update.no_update_pvia(records, aux, eq, alpha=valid_alpha, mu0=int(mu0))
+
+    elif attack_name == "no_update_lvia":
+        # Section 6.3 Variant B: snapshot count-distribution LVIA without update knowledge.
+        # aux.pre_snapshot = the full snapshot (only L[w] counts are used internally).
+        records, gt, events = simulate(docs, sim_cfg)
+        eq = build_equality(records, mode=equality_mode, delta=delta)
+        if mu0 is None:
+            mu0 = len(docs) // 2
+        snapshot = make_aux_pre_snapshot(docs, mu0=int(mu0))
+        aux = Aux(pre_snapshot=snapshot)
+        preds = no_update.no_update_lvia(records, aux, eq, mu0=int(mu0))
+
     else:
         raise ValueError(f"Unknown attack: {attack_name!r}")
 
@@ -341,8 +386,10 @@ def _run_signature(
     )
 
 
-def read_completed_runs(csv_path: str | pathlib.Path) -> set[tuple]:
+def read_completed_runs(csv_path: str | pathlib.Path | None) -> set[tuple]:
     """Parse existing CSV and return set of completed run signatures."""
+    if csv_path is None:
+        return set()
     p = pathlib.Path(csv_path)
     if not p.exists() or p.stat().st_size == 0:
         return set()
@@ -564,7 +611,7 @@ def parse_args() -> argparse.Namespace:
     )
     # Direct single-run arguments
     parser.add_argument("--dataset", type=str, default="synthetic", help="Dataset name.")
-    parser.add_argument("--attack", type=str, default="fma", help="Attack: fma, via, pvia, lvia-k, lvia-s, no_update.")
+    parser.add_argument("--attack", type=str, default="fma", help="Attack: fma, via, pvia, lvia-k, lvia-s, no_update, no_update_pvia, no_update_lvia.")
     parser.add_argument("--equality", type=str, default="T1", help="Equality mode: T1 or T2.")
     parser.add_argument("--tau", type=int, default=3, help="Number of epochs/intervals.")
     parser.add_argument("--lambda", dest="lambda_queries", type=float, default=50.0, help="Poisson query rate.")

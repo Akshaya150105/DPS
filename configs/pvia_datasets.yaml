@@ -1,0 +1,34 @@
+# Section 6.2: PVIA on en/lu 1000, 2000, 3000 datasets
+# alpha in {0.5, 0.6, 0.7, 0.8, 0.9} (fraction of corpus known to attacker)
+# gamma in {0.1, 0.2, 0.3} (deletion rate)
+# tau=24, lambda=120000, T1 equality
+# Reproduces the paper's PVIA sensitivity analysis across dataset sizes and deletion rates.
+dataset:
+  - en1000
+  - en2000
+  - en3000
+  - lu1000
+  - lu2000
+  - lu3000
+attack:
+  - pvia
+tau:
+  - 24
+lambda:
+  - 120000
+gamma:
+  - 0.1
+  - 0.2
+  - 0.3
+alpha:
+  - 0.9
+  - 0.8
+  - 0.7
+  - 0.6
+  - 0.5
+eta:
+  - 0.5
+noise:
+  - 0.0
+equality:
+  - T1
