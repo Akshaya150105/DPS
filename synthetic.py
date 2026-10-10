@@ -110,7 +110,7 @@ def make_obvious_query_dist(
     """
     n = len(vocab)
     # Background probability for non-focal keywords.
-    background = 0.01
+    background = 0.001
     result: dict[int, dict[str, float]] = {}
 
     for t in range(tau):
@@ -120,8 +120,14 @@ def make_obvious_query_dist(
         hot_kws = set(vocab[lo:hi])
 
         raw: dict[str, float] = {}
-        for kw in vocab:
-            raw[kw] = 1.0 if kw in hot_kws else background
+        for i, kw in enumerate(vocab):
+            if kw in hot_kws:
+                if tau > 1:
+                    raw[kw] = float(2.5 ** (i - lo + 1))
+                else:
+                    raw[kw] = 1.0
+            else:
+                raw[kw] = background
 
         total = sum(raw.values())
         result[t] = {kw: v / total for kw, v in raw.items()}

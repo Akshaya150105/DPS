@@ -4,7 +4,10 @@ import collections
 
 import numpy as np
 
-from types_ import Document, Event
+from config import Config
+from types_ import Document, Event, LeakageRecord
+import leakage
+import schemes
 
 
 class DynamicDB:
@@ -550,3 +553,134 @@ def make_aux_pre_snapshot(
     """
     sorted_docs = sorted(dataset, key=lambda d: d.timestamp)
     return sorted_docs[:max(0, mu0)]
+
+
+# ---------------------------------------------------------------------------
+# End-to-end simulation
+# ---------------------------------------------------------------------------
+
+def simulate(
+    dataset: list[Document],
+    config: Config,
+    query_dist: dict[int, dict[str, float]] | None = None,
+) -> tuple[list[LeakageRecord], dict[int, str], list[Event]]:
+    """Run an end-to-end simulation across multiple intervals.
+
+    For each time interval 0 .. tau-1:
+      1. Applies updates (inserts interval documents and performs deletions
+         according to gamma).
+      2. Draws search queries for the interval from the query distribution.
+      3. For each query, generates a LeakageRecord with:
+         - token from schemes.make_token(keyword, config.equality, rng)
+         - ulen from leakage.ulen
+         - rlen from leakage.rlen
+         - fvol from leakage.fvol
+      4. Records the ground truth (query_id -> true keyword).
+
+    Args:
+        dataset:    List of :class:`~types_.Document` objects representing the corpus.
+        config:     Experiment :class:`~config.Config` containing hyperparameters:
+                    seed, tau, gamma, lambda_queries, equality, dataset.
+        query_dist: Optional pre-computed query distribution
+                    ``{interval -> {keyword -> prob}}``. If omitted, generated
+                    from config.
+
+    Returns:
+        (records, ground_truth, events):
+        - records: List of :class:`~types_.LeakageRecord` objects across all epochs.
+        - ground_truth: Dict mapping query_id -> true keyword string.
+        - events: Flat list of all :class:`~types_.Event` objects generated across all intervals.
+    """
+    if not dataset:
+        return [], {}, []
+
+    rng = np.random.default_rng(config.seed)
+    tau = config.tau
+    gamma = config.gamma
+    lam = config.lambda_queries
+    equality_mode = getattr(config, "equality", "T1")
+
+    # Vocabulary of keywords in the dataset.
+    vocab = sorted({kw for doc in dataset for kw in doc.keywords})
+    if not vocab:
+        return [], {}, []
+
+    # Pre-compute document volumes for fast fvol evaluation.
+    doc_volumes: dict[int, int] = {doc.doc_id: len(doc.keywords) for doc in dataset}
+    volume_of = lambda doc_id: doc_volumes.get(doc_id, 0)
+
+    # Query distribution across all tau intervals.
+    if query_dist is None:
+        if getattr(config, "query_dist", None) is not None:
+            query_dist = config.query_dist
+        elif getattr(config, "dataset", "") == "obvious":
+            from synthetic import make_obvious_query_dist
+            query_dist = make_obvious_query_dist(vocab, tau)
+        else:
+            dist_mode = "trends" if getattr(config, "dataset", "") == "trends" else "synthetic"
+            query_dist = generate_query_distribution(vocab, tau, rng, mode=dist_mode)
+
+    # Sort documents by timestamp to assign them to intervals chronologically.
+    sorted_docs = sorted(dataset, key=lambda d: d.timestamp)
+    n_docs = len(sorted_docs)
+
+    intervals: list[list[Document]] = [
+        sorted_docs[(t * n_docs) // tau : ((t + 1) * n_docs) // tau]
+        for t in range(tau)
+    ]
+
+    db = DynamicDB()
+    mu = 0
+    total_inserted = 0
+    total_deleted = 0
+
+    records: list[LeakageRecord] = []
+    ground_truth: dict[int, str] = {}
+    query_id = 0
+
+    for t in range(tau):
+        # 1. Apply insertions for interval t.
+        for doc in intervals[t]:
+            db.add(doc, mu)
+            mu += 1
+        total_inserted += len(intervals[t])
+
+        # 2. Apply deletions for interval t.
+        target_deleted = int(gamma * total_inserted)
+        n_to_delete = target_deleted - total_deleted
+        if n_to_delete > 0:
+            live = list(db.live_doc_ids)
+            n_to_delete = min(n_to_delete, len(live))
+            chosen = rng.choice(live, size=n_to_delete, replace=False)
+            for doc_id in (int(x) for x in chosen):
+                db.delete(doc_id, mu)
+                mu += 1
+            total_deleted += n_to_delete
+
+        # Logical timestamp snapshot at query time for this interval.
+        current_mu = db.events[-1].mu if db.events else 0
+
+        # 3. Draw queries for interval t.
+        interval_queries = draw_queries(query_dist[t], lam, tau, rng)
+
+        # 4. Generate LeakageRecord for each query.
+        for kw in interval_queries:
+            tok = schemes.make_token(kw, equality_mode, rng)
+            u = leakage.ulen(db.events, kw, current_mu)
+            r = leakage.rlen(db.events, kw, current_mu)
+            fv = leakage.fvol(db.events, kw, current_mu, volume_of)
+
+            record = LeakageRecord(
+                query_id=query_id,
+                token=tok,
+                interval=t,
+                timestamp=current_mu,
+                ulen=u,
+                rlen=r,
+                fvol=fv,
+            )
+            records.append(record)
+            ground_truth[query_id] = kw
+            query_id += 1
+
+    return records, ground_truth, list(db.events)
