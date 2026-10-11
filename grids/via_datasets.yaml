@@ -1,0 +1,25 @@
+# Section 6.1: baseline VIA (attacker knows all files inserted between linked queries)
+dataset:
+  - lu500
+  - lu1000
+  - lu2000
+  - lu3000
+attack:
+  - via
+tau:
+  - 10
+lambda:
+  - 500
+gamma:
+  - 0.0
+  - 0.1
+  - 0.2
+  - 0.3
+alpha:
+  - 0.8
+eta:
+  - 0.5
+noise:
+  - 0.0
+equality:
+  - T1

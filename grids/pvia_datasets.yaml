@@ -4,18 +4,15 @@
 # tau=24, lambda=120000, T1 equality
 # Reproduces the paper's PVIA sensitivity analysis across dataset sizes and deletion rates.
 dataset:
-  - en1000
-  - en2000
-  - en3000
   - lu1000
   - lu2000
   - lu3000
 attack:
   - pvia
 tau:
-  - 24
+  - 10
 lambda:
-  - 120000
+  - 500
 gamma:
   - 0.1
   - 0.2

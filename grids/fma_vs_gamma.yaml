@@ -1,6 +1,6 @@
 # Figure 5(d): FMA vs gamma
 dataset:
-  - enron
+  - lu2000
 attack:
   - fma
 tau:

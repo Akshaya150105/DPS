@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 import leakage
 from types_ import LeakageRecord
 
@@ -183,33 +185,93 @@ def _link_t1(records: list[LeakageRecord], uf: UnionFind) -> None:
 # ---------------------------------------------------------------------------
 
 def _link_t2(records: list[LeakageRecord], uf: UnionFind, delta: float) -> None:
-    """Link records whose RSP similarity >= delta, restricting to same/adjacent intervals."""
-    # Bucket records by interval for O(n * bucket_size) comparisons.
+    """Link records whose RSP similarity >= delta, restricting to same/adjacent intervals.
+
+    Probe queries are never linked to other queries in their own interval.
+
+    Exact shortcuts keep this tractable at paper scale (10^5 queries):
+      * Records in one interval with identical fvol ("a class") compare the
+        same way against every other record, so similarity is computed once
+        per pair of classes. A hit then links the members the rules allow:
+        non-probe members across same-interval classes, all members across
+        adjacent-interval classes.
+      * rsp(A, B) <= min(|A|, |B|) / max(|A|, |B|), so class pairs whose
+        sizes differ by more than that ratio allows are skipped.
+      * Similarities for one class against a block of classes are computed
+        together with numpy on dense volume vectors.
+    """
     by_interval: dict[int, list[LeakageRecord]] = {}
     for rec in records:
         by_interval.setdefault(rec.interval, []).append(rec)
 
-    all_intervals = sorted(by_interval)
+    # Dense volume axis shared by all intervals.
+    volumes = sorted({v for rec in records for v in rec.fvol})
+    vol_index = {v: k for k, v in enumerate(volumes)}
 
-    for i, t in enumerate(all_intervals):
-        # Compare queries in interval t with those in t and t+1 only.
-        adjacent = by_interval[t]
-        if i + 1 < len(all_intervals):
-            adjacent = adjacent + by_interval[all_intervals[i + 1]]
+    class _Classes:
+        """Distinct fvol classes of one interval, sorted by response size."""
 
-        current = by_interval[t]
+        def __init__(self, recs: list[LeakageRecord]) -> None:
+            by_sig: dict[frozenset, tuple[list[int], list[int]]] = {}
+            for rec in sorted(recs, key=lambda r: r.query_id):
+                sig = frozenset(rec.fvol.items())
+                non_probes, probes = by_sig.setdefault(sig, ([], []))
+                (probes if getattr(rec, "is_probe", False) else non_probes).append(rec.query_id)
+            items = sorted(by_sig.items(), key=lambda kv: sum(c for _, c in kv[0]))
+            self.sizes = np.array([sum(c for _, c in sig) for sig, _ in items], dtype=np.int64)
+            self.non_probe = [np_ids[0] if np_ids else None for _, (np_ids, _) in items]
+            # Non-probes in a class are mutually linked (when allowed), so the
+            # first non-probe stands for all of them; probes stand alone.
+            self.anchors = [([np_ids[0]] if np_ids else []) + p_ids for _, (np_ids, p_ids) in items]
+            self.matrix = np.zeros((len(items), len(volumes)), dtype=np.int64)
+            for row, (sig, (np_ids, _)) in enumerate(items):
+                for v, c in sig:
+                    self.matrix[row, vol_index[v]] = c
+                # Same-interval links between identical non-probe records.
+                if len(np_ids) > 1 and _rsp_sizes(self.sizes[row], self.sizes[row], self.sizes[row]) >= delta:
+                    for q in np_ids[1:]:
+                        uf.union(np_ids[0], q)
 
-        for j, rec_a in enumerate(current):
-            for rec_b in adjacent:
-                if rec_b.query_id <= rec_a.query_id:
-                    # Avoid double-counting; only process (a, b) with b > a.
+    def _rsp_sizes(inter, size_a, size_b):
+        union = size_a + size_b - inter
+        return np.where(union == 0, 1.0, inter / np.maximum(union, 1))
+
+    classes = {t: _Classes(recs) for t, recs in by_interval.items()}
+    prune = delta > 0
+
+    def compare(a: "_Classes", b: "_Classes", same_interval: bool) -> None:
+        for i in range(len(a.sizes)):
+            sa = int(a.sizes[i])
+            if prune:
+                # Only classes with delta*sa <= sb <= sa/delta can reach the threshold.
+                lo = int(np.searchsorted(b.sizes, delta * sa - 1e-9, side="left"))
+                hi = int(np.searchsorted(b.sizes, sa / delta + 1e-9, side="right"))
+            else:
+                lo, hi = 0, len(b.sizes)
+            if same_interval:
+                if a.non_probe[i] is None:
                     continue
-                # Do not link probe queries with other queries in the same interval
-                if rec_a.interval == rec_b.interval and (getattr(rec_a, "is_probe", False) or getattr(rec_b, "is_probe", False)):
-                    continue
-                sim = leakage.rsp(rec_a.fvol, rec_b.fvol)
-                if sim >= delta:
-                    uf.union(rec_a.query_id, rec_b.query_id)
+                lo = max(lo, i + 1)
+            if lo >= hi:
+                continue
+            inter = np.minimum(b.matrix[lo:hi], a.matrix[i]).sum(axis=1)
+            sims = _rsp_sizes(inter, sa, b.sizes[lo:hi])
+            for off in np.nonzero(sims >= delta)[0]:
+                j = lo + int(off)
+                if same_interval:
+                    # Probes never link within their own interval.
+                    if b.non_probe[j] is not None:
+                        uf.union(a.non_probe[i], b.non_probe[j])
+                else:
+                    first = a.anchors[i][0]
+                    for q in a.anchors[i][1:] + b.anchors[j]:
+                        uf.union(first, q)
+
+    all_intervals = sorted(classes)
+    for k, t in enumerate(all_intervals):
+        compare(classes[t], classes[t], same_interval=True)
+        if k + 1 < len(all_intervals):
+            compare(classes[t], classes[all_intervals[k + 1]], same_interval=False)
 
 
 # ---------------------------------------------------------------------------

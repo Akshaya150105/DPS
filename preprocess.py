@@ -298,6 +298,23 @@ def stem_word(w: str) -> str:
 # Text cleaning and tokenization helpers
 # ---------------------------------------------------------------------------
 
+# NLTK English stopword list (inlined to avoid a runtime dependency).
+STOPWORDS: frozenset[str] = frozenset("""
+i me my myself we our ours ourselves you your yours yourself yourselves he him
+his himself she her hers herself it its itself they them their theirs themselves
+what which who whom this that these those am is are was were be been being have
+has had having do does did doing a an the and but if or because as until while
+of at by for with about against between into through during before after above
+below to from up down in out on off over under again further then once here
+there when where why how all any both each few more most other some such no nor
+not only own same so than too very s t can will just don should now d ll m o re
+ve y ain aren couldn didn doesn hadn hasn haven isn ma mightn mustn needn shan
+shouldn wasn weren won wouldn you're you've you'll you'd she's it's that'll
+""".split())
+
+# Apache mailing-list footer appended to every Lucene message.
+_LIST_FOOTER_PATTERN = r"(?i)\n\s*-*\s*\n\s*To unsubscribe, e-mail:"
+
 def remove_quoted_replies(text: str) -> str:
     """Remove quoted reply sections and quote-prefixed lines from email body.
 
@@ -315,6 +332,7 @@ def remove_quoted_replies(text: str) -> str:
         r"(?i)\n\s*________________________________",
         r"(?i)\n\s*From:.*?\n\s*Sent:.*?\n\s*To:.*?\n\s*Subject:",
         r"(?i)\n\s*On\s+.*?wrote:\s*\n",
+        _LIST_FOOTER_PATTERN,
     ]
     for pattern in reply_split_patterns:
         text = re.split(pattern, text, maxsplit=1)[0]
@@ -329,12 +347,15 @@ def remove_quoted_replies(text: str) -> str:
     return "\n".join(cleaned_lines)
 
 
-def tokenize_text(text: str, stem: bool = False) -> list[str]:
+def tokenize_text(
+    text: str, stem: bool = False, remove_stopwords: bool = False
+) -> list[str]:
     """Lowercase, remove punctuation and quoted replies, tokenize, drop < 3 chars.
 
     Args:
         text: Raw email body text.
         stem: If True, apply Porter stemming to tokens.
+        remove_stopwords: If True, drop English stopwords (before stemming).
 
     Returns:
         List of cleaned token strings (each of length >= 3).
@@ -355,7 +376,11 @@ def tokenize_text(text: str, stem: bool = False) -> list[str]:
     # 5. Drop tokens shorter than 3 characters
     tokens = [tok for tok in raw_tokens if len(tok) >= 3]
 
-    # 6. Optional stemming
+    # 6. Optional stopword removal
+    if remove_stopwords:
+        tokens = [tok for tok in tokens if tok not in STOPWORDS]
+
+    # 7. Optional stemming
     if stem:
         tokens = [stem_word(tok) for tok in tokens]
         tokens = [tok for tok in tokens if len(tok) >= 3]
@@ -637,6 +662,7 @@ def preprocess_dataset(
     start: Optional[Any] = None,
     end: Optional[Any] = None,
     freq: str = "month",
+    remove_stopwords: bool = False,
 ) -> dict[str, Any]:
     """Parse raw messages, select top-K keywords, and save processed artifacts.
 
@@ -657,6 +683,7 @@ def preprocess_dataset(
         start:   Optional start date boundary for interval filtering.
         end:     Optional end date boundary for interval filtering.
         freq:    Interval frequency ('month' by default).
+        remove_stopwords: Whether to drop English stopwords before keyword selection.
 
     Returns:
         Metadata dict summarizing document counts, vocabulary, and date range.
@@ -684,7 +711,7 @@ def preprocess_dataset(
     doc_freq: dict[str, int] = collections.defaultdict(int)
 
     for dt, body in raw_msgs:
-        tokens = tokenize_text(body, stem=stem)
+        tokens = tokenize_text(body, stem=stem, remove_stopwords=remove_stopwords)
         unique_tokens = set(tokens)
         doc_entries.append((dt, unique_tokens))
         for tok in unique_tokens:
@@ -733,6 +760,7 @@ def preprocess_dataset(
         "name": name,
         "source": source_lower,
         "stem": stem,
+        "remove_stopwords": remove_stopwords,
         "k": k,
         "counts": {
             "documents": len(docs),
@@ -815,6 +843,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         help="Enable Porter stemming (default: False).",
     )
     parser.add_argument(
+        "--remove-stopwords",
+        action="store_true",
+        default=False,
+        help="Drop English stopwords before selecting top-K keywords (default: False).",
+    )
+    parser.add_argument(
         "--out-dir",
         default="datasets/processed",
         help="Directory to save output files (default: datasets/processed).",
@@ -870,6 +904,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         start=start,
         end=end,
         freq=args.freq,
+        remove_stopwords=args.remove_stopwords,
     )
 
 

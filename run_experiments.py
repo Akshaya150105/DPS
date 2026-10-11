@@ -158,11 +158,8 @@ def _normalize_attack_name(attack: str) -> str:
     return a
 
 
-def run_one(
-    config: Config | dict[str, Any],
-    csv_path: str | pathlib.Path | None = "results/results.csv",
-) -> dict[str, Any]:
-    """Execute a single attack experiment and log results.
+def run_pipeline(config: Config | dict[str, Any]) -> dict[str, Any]:
+    """Execute a single attack experiment and return all intermediate artifacts.
 
     Steps:
       1. Loads the dataset.
@@ -171,14 +168,13 @@ def run_one(
       4. Builds adversary auxiliary knowledge for the chosen attack.
       5. Runs the attack (fma, via, pvia, lvia-k, lvia-s, no_update).
       6. Computes accuracy against ground truth.
-      7. Logs result via :func:`evaluate.log_result`.
 
     Args:
-        config:   :class:`~config.Config` object or dictionary containing hyperparameters.
-        csv_path: Destination CSV file path (or None to skip logging).
+        config: :class:`~config.Config` object or dictionary containing hyperparameters.
 
     Returns:
-        Dictionary containing the full result row logged to CSV.
+        Dict with ``row`` (the result row), ``docs``, ``vocab``, ``records``,
+        ``ground_truth``, ``events``, ``equality``, ``aux`` and ``predictions``.
     """
     start_time = time.perf_counter()
 
@@ -198,6 +194,7 @@ def run_one(
         keyword_count_cfg = config.get("keyword_count")
         tolerance = config.get("tolerance")
         mu0 = config.get("mu0")
+        query_dist_source = config.get("query_dist_source")
     else:
         dataset_name = getattr(config, "dataset", "synthetic")
         raw_attack = getattr(config, "attack", "fma")
@@ -213,6 +210,7 @@ def run_one(
         keyword_count_cfg = getattr(config, "keyword_count", None)
         tolerance = getattr(config, "tolerance", None)
         mu0 = getattr(config, "mu0", None)
+        query_dist_source = getattr(config, "query_dist_source", None)
 
     attack_name = _normalize_attack_name(raw_attack)
 
@@ -242,8 +240,16 @@ def run_one(
         if dataset_name == "obvious":
             true_dist = make_obvious_query_dist(vocab, tau)
         else:
-            dist_mode = "trends" if dataset_name == "trends" else "synthetic"
-            true_dist = generate_query_distribution(vocab, tau, rng, mode=dist_mode)
+            # Real corpora use Google Trends (paper §7.1); synthetic corpora keep
+            # the synthetic distribution unless told otherwise.
+            if query_dist_source is None:
+                query_dist_source = "synthetic" if dataset_name == "synthetic" else "trends"
+            if query_dist_source not in ("trends", "synthetic"):
+                raise ValueError(f"query_dist_source must be 'trends' or 'synthetic', got {query_dist_source!r}")
+            true_dist = generate_query_distribution(
+                vocab, tau, rng, mode=query_dist_source,
+                fallback_on_missing=False if query_dist_source == "trends" else None,
+            )
 
         aux_query_dist = make_aux_query_dist(true_dist, noise_n=noise, rng=rng)
         aux = Aux(query_dist=aux_query_dist)
@@ -325,8 +331,11 @@ def run_one(
 
     # 4. Compute accuracy
     acc = evaluate.accuracy(preds, gt)
-    correct = sum(1 for qid, kw in gt.items() if preds.get(qid) == kw)
-    total = len(gt)
+    # Count only sampled (non-probe) queries so correct / total matches accuracy.
+    sampled = getattr(gt, "sampled_query_ids", None)
+    eval_qids = [qid for qid in gt if sampled is None or qid in sampled]
+    correct = sum(1 for qid in eval_qids if preds.get(qid) == gt[qid])
+    total = len(eval_qids)
     runtime_s = round(time.perf_counter() - start_time, 4)
 
     # 5. Format result row
@@ -348,10 +357,38 @@ def run_one(
         "seed": seed,
     }
 
-    # 6. Log result
+    return {
+        "row": row_dict,
+        "docs": docs,
+        "vocab": vocab,
+        "records": records,
+        "ground_truth": gt,
+        "events": events,
+        "equality": eq,
+        "aux": aux,
+        "predictions": preds,
+    }
+
+
+def run_one(
+    config: Config | dict[str, Any],
+    csv_path: str | pathlib.Path | None = "results/results.csv",
+) -> dict[str, Any]:
+    """Execute a single attack experiment and log results.
+
+    Runs :func:`run_pipeline` and logs the result row via
+    :func:`evaluate.log_result`.
+
+    Args:
+        config:   :class:`~config.Config` object or dictionary containing hyperparameters.
+        csv_path: Destination CSV file path (or None to skip logging).
+
+    Returns:
+        Dictionary containing the full result row logged to CSV.
+    """
+    row_dict = run_pipeline(config)["row"]
     if csv_path is not None:
         evaluate.log_result(row_dict, csv_path)
-
     return row_dict
 
 

@@ -770,6 +770,12 @@ def simulate(
     sampled_query_ids: set[int] = set()
     query_id = 0
 
+    # Per-keyword view of the update log. Every leakage function filters by
+    # keyword first, so passing only that keyword's events gives identical
+    # results without rescanning the whole log for each query.
+    events_by_kw: dict[str, list[Event]] = collections.defaultdict(list)
+    n_indexed = 0
+
     for t in range(tau):
         # 1. Apply insertions for interval t.
         for doc in intervals[t]:
@@ -796,14 +802,30 @@ def simulate(
         if lam <= 0:
             continue
 
+        for e in db.events[n_indexed:]:
+            events_by_kw[e.keyword].append(e)
+        n_indexed = len(db.events)
+
+        # Leakage is fixed within an interval, so compute it once per keyword.
+        interval_leakage: dict[str, tuple[int, int, collections.Counter]] = {}
+
+        def leakage_for(kw: str) -> tuple[int, int, collections.Counter]:
+            if kw not in interval_leakage:
+                kw_events = events_by_kw.get(kw, [])
+                interval_leakage[kw] = (
+                    leakage.ulen(kw_events, kw, current_mu),
+                    leakage.rlen(kw_events, kw, current_mu),
+                    leakage.fvol(kw_events, kw, current_mu, volume_of),
+                )
+            u, r, fv = interval_leakage[kw]
+            return u, r, collections.Counter(fv)
+
         # 3. Draw sampled search queries for interval t.
         interval_queries = draw_queries(query_dist[t], lam, tau, rng)
 
         for kw in interval_queries:
             tok = schemes.make_token(kw, equality_mode, rng)
-            u = leakage.ulen(db.events, kw, current_mu)
-            r = leakage.rlen(db.events, kw, current_mu)
-            fv = leakage.fvol(db.events, kw, current_mu, volume_of)
+            u, r, fv = leakage_for(kw)
 
             record = LeakageRecord(
                 query_id=query_id,
@@ -825,9 +847,7 @@ def simulate(
             probe_rng = np.random.default_rng(config.seed + 10000 + t)
             for kw in vocab:
                 tok = schemes.make_token(kw, equality_mode, probe_rng)
-                u = leakage.ulen(db.events, kw, current_mu)
-                r = leakage.rlen(db.events, kw, current_mu)
-                fv = leakage.fvol(db.events, kw, current_mu, volume_of)
+                u, r, fv = leakage_for(kw)
 
                 record = LeakageRecord(
                     query_id=query_id,

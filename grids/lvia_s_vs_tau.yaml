@@ -1,6 +1,9 @@
 # Figure 7(b): LVIA-S vs tau
 dataset:
-  - enron
+  - lu500
+  - lu1000
+  - lu2000
+  - lu3000
 attack:
   - lvia-s
 tau:

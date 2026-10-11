@@ -1,6 +1,6 @@
 # Figure 5(a): FMA vs tau with T1 and T2
 dataset:
-  - enron
+  - lu1000
 attack:
   - fma
 tau:

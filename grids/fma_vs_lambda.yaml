@@ -1,6 +1,6 @@
 # Figure 5(c): FMA vs lambda
 dataset:
-  - enron
+  - lu3000
 attack:
   - fma
 tau:

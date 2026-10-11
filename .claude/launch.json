@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dps-ui",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "streamlit", "run", "app.py", "--server.port", "8501", "--server.headless", "true", "--server.address", "localhost", "--browser.gatherUsageStats", "false"],
+      "port": 8501
+    }
+  ]
+}

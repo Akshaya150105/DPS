@@ -318,8 +318,8 @@ class TestPatch19bGrids:
             ("configs/fma_datasets.yaml", 16),
             ("configs/pvia_datasets.yaml", 90),
             ("configs/no_update_variants.yaml", 6),
-            ("grids/fma_datasets.yaml", 16),
-            ("grids/pvia_datasets.yaml", 90),
+            ("grids/fma_datasets.yaml", 8),
+            ("grids/pvia_datasets.yaml", 45),
             ("grids/no_update_variants.yaml", 6),
         ],
     )
@@ -336,3 +336,52 @@ class TestPatch19bGrids:
         )
         assert len(runs) == expected_runs
 
+
+
+# ---------------------------------------------------------------------------
+# FMA on real corpora uses Google Trends
+# ---------------------------------------------------------------------------
+
+def _write_small_corpus(tmp_path):
+    import pickle
+    from datetime import datetime, timedelta
+    from types_ import Document
+
+    vocab = [f"kw{i}" for i in range(6)]
+    docs = [
+        Document(doc_id=i, keywords=frozenset(vocab[j] for j in range(6) if (i + j) % 3 == 0),
+                 timestamp=datetime(2000, 1, 1) + timedelta(days=i))
+        for i in range(30)
+    ]
+    path = tmp_path / "realish.pkl"
+    with open(path, "wb") as fh:
+        pickle.dump((docs, vocab, "realish"), fh)
+    return path, vocab
+
+
+def test_fma_real_dataset_requires_trends_csv(tmp_path, monkeypatch):
+    from run_experiments import run_pipeline
+
+    path, _ = _write_small_corpus(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        run_pipeline({"dataset": str(path), "attack": "fma", "tau": 2, "lambda": 50, "gamma": 0.0})
+
+
+def test_fma_real_dataset_uses_trends_csv(tmp_path, monkeypatch):
+    import csv
+    from run_experiments import run_pipeline
+
+    path, vocab = _write_small_corpus(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "datasets" / "trends").mkdir(parents=True)
+    with open(tmp_path / "datasets" / "trends" / "trends.csv", "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["month", "keyword", "prob"])
+        for m in ("2021-01", "2021-02"):
+            for kw in vocab:
+                w.writerow([m, kw, 1.0 if kw == "kw0" else 0.0])
+    out = run_pipeline({"dataset": str(path), "attack": "fma", "tau": 2, "lambda": 50, "gamma": 0.0})
+    sampled = [q for q in out["ground_truth"] if q in out["ground_truth"].sampled_query_ids]
+    # All of the query mass is on kw0 in the trends file.
+    assert sampled and all(out["ground_truth"][q] == "kw0" for q in sampled)

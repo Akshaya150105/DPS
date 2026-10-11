@@ -1,6 +1,6 @@
 # Figure 6: PVIA alpha by gamma
 dataset:
-  - enron
+  - lu1000
 attack:
   - pvia
 tau:

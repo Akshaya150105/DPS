@@ -215,12 +215,19 @@ def fetch_trends(
     initial_delay: float = 3.0,
     request_delay: float = 1.0,
     pytrend: Any | None = None,
+    anchor: str | None = None,
 ) -> pd.DataFrame:
     """Download and normalize monthly Google Trends data for a vocabulary.
 
     Batches keywords in groups of up to 5, aggregates data to monthly level,
     normalizes each month's relative interest into a probability distribution
     over the keywords, and writes out datasets/trends/trends.csv.
+
+    Google Trends scales every request independently (its most popular term is
+    100), so raw values from different batches are not comparable. When
+    *anchor* is given, every request carries the anchor keyword plus 4
+    vocabulary keywords, and each batch is rescaled so the anchor's monthly
+    values match those of the first batch. This puts all keywords on one scale.
 
     Args:
         keywords: Full list of vocabulary keywords.
@@ -232,6 +239,9 @@ def fetch_trends(
         initial_delay: Initial retry delay in seconds.
         request_delay: Polite sleep duration between batch requests.
         pytrend: Optional TrendReq instance or mock.
+        anchor: Optional keyword included in every request to put batches on a
+            common scale (recommended for more than 5 keywords). Pick a term of
+            moderate, steady popularity so it neither dominates nor rounds to 0.
 
     Returns:
         DataFrame in long format with columns: month, keyword, prob.
@@ -250,11 +260,15 @@ def fetch_trends(
     timeframe = format_timeframe(start, end)
     cache_path = pathlib.Path(cache_dir) if cache_dir else None
 
-    # Google Trends allows maximum 5 keywords per request
-    batch_size = 5
-    batches = [unique_kws[i:i + batch_size] for i in range(0, len(unique_kws), batch_size)]
+    # Google Trends allows maximum 5 keywords per request; one slot goes to the anchor.
+    batch_kws = [kw for kw in unique_kws if kw != anchor]
+    batch_size = 4 if anchor else 5
+    batches = [batch_kws[i:i + batch_size] for i in range(0, len(batch_kws), batch_size)]
+    if anchor:
+        batches = [[anchor] + b for b in batches]
 
     batch_dfs: list[pd.DataFrame] = []
+    anchor_ref: pd.Series | None = None
     for i, batch in enumerate(batches):
         df = fetch_batch_with_retry(
             pytrend=pytrend,
@@ -270,6 +284,17 @@ def fetch_trends(
             if not isinstance(df.index, pd.DatetimeIndex):
                 df.index = pd.to_datetime(df.index)
             monthly = df.resample("MS").mean()
+            if anchor and anchor in monthly.columns:
+                if anchor_ref is None:
+                    anchor_ref = monthly[anchor]
+                else:
+                    batch_anchor = monthly[anchor]
+                    if batch_anchor.sum() > 0:
+                        # Per-batch scale factor from the anchor's total interest.
+                        monthly = monthly * (anchor_ref.sum() / batch_anchor.sum())
+                    else:
+                        logger.warning("Anchor %r is zero in batch %s; batch left unscaled.", anchor, batch)
+                    monthly = monthly.drop(columns=[anchor])
             batch_dfs.append(monthly)
 
         if i < len(batches) - 1 and request_delay > 0:
@@ -333,7 +358,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--vocab-file", "-v",
-        help="Path to vocabulary file (.txt, .json, .pkl, or .csv).",
+        nargs="+",
+        help="One or more vocabulary files (.txt, .json, .pkl, or .csv); keywords are merged.",
     )
     parser.add_argument(
         "--keywords", "-k",
@@ -372,11 +398,19 @@ def main(argv: list[str] | None = None) -> None:
         help="Initial retry delay in seconds (default: 3.0).",
     )
 
+    parser.add_argument(
+        "--anchor",
+        default=None,
+        help="Keyword included in every request to put batches on one scale "
+             "(recommended for more than 5 keywords).",
+    )
+
     args = parser.parse_args(argv)
 
     keywords: list[str] = []
     if args.vocab_file:
-        keywords = load_vocab_file(args.vocab_file)
+        for vf in args.vocab_file:
+            keywords.extend(load_vocab_file(vf))
     elif args.keywords:
         keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
     else:
@@ -392,6 +426,7 @@ def main(argv: list[str] | None = None) -> None:
         cache_dir=args.cache_dir,
         max_retries=args.retries,
         initial_delay=args.delay,
+        anchor=args.anchor,
     )
 
 

@@ -7,16 +7,16 @@
 # LVIA is expected to weaken here because update diversity cannot be used
 # (see Patch 15b docstring).
 dataset:
-  - en500
   - lu500
+  - lu1000
 attack:
   - no_update
   - no_update_pvia
   - no_update_lvia
 tau:
-  - 24
+  - 10
 lambda:
-  - 120000
+  - 500
 gamma:
   - 0.1
 alpha:

@@ -1,6 +1,9 @@
 # Figure 5(f): FMA with noise 0, 5, 10
 dataset:
-  - enron
+  - lu500
+  - lu1000
+  - lu2000
+  - lu3000
 attack:
   - fma
 tau:

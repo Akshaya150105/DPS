@@ -339,3 +339,43 @@ class TestFetchTrendsScript:
         assert m2["energy"] == pytest.approx(0.5)
         assert m2["finance"] == pytest.approx(0.5)
         assert abs(m2.sum() - 1.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Anchor-based cross-batch normalization
+# ---------------------------------------------------------------------------
+
+class _ScaledTrends:
+    """Fake pytrends: true interest is fixed; each request rescales so its max is 100."""
+
+    TRUE = {"anchor": 20.0, "a": 10.0, "b": 40.0, "c": 5.0, "d": 80.0, "e": 30.0, "f": 60.0}
+
+    def build_payload(self, batch, timeframe):
+        self.batch = batch
+
+    def interest_over_time(self):
+        idx = pd.date_range("2021-01-01", periods=2, freq="MS")
+        top = max(self.TRUE[k] for k in self.batch)
+        return pd.DataFrame({k: [round(self.TRUE[k] / top * 100)] * 2 for k in self.batch}, index=idx)
+
+
+def test_fetch_trends_anchor_puts_batches_on_one_scale(tmp_path: pathlib.Path) -> None:
+    kws = ["a", "b", "c", "d", "e", "f"]
+    df = fetch_trends(kws, "2021-01", "2021-02", out_path=tmp_path / "t.csv", cache_dir=None,
+                      request_delay=0, pytrend=_ScaledTrends(), anchor="anchor")
+    month = df[df["month"] == "2021-01"].set_index("keyword")["prob"]
+    true = pd.Series({k: _ScaledTrends.TRUE[k] for k in kws})
+    expected = true / true.sum()
+    assert "anchor" not in month.index
+    for k in kws:
+        assert month[k] == pytest.approx(expected[k], rel=0.05)
+
+
+def test_fetch_trends_without_anchor_keeps_batches_separate(tmp_path: pathlib.Path) -> None:
+    kws = ["a", "b", "c", "d", "e", "f"]
+    df = fetch_trends(kws, "2021-01", "2021-02", out_path=tmp_path / "t.csv", cache_dir=None,
+                      request_delay=0, pytrend=_ScaledTrends())
+    month = df[df["month"] == "2021-01"].set_index("keyword")["prob"]
+    # "d" (true 80) and "f" (true 60) each top their own batch, so without an
+    # anchor both read as 100 and come out equal.
+    assert month["f"] == pytest.approx(month["d"])

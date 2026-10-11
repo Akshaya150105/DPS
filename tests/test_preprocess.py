@@ -509,3 +509,28 @@ class TestMonthlyIntervals:
         for d in docs:
             assert d.interval == 0
 
+
+
+# ---------------------------------------------------------------------------
+# Stopword removal and mailing-list footer stripping
+# ---------------------------------------------------------------------------
+
+def test_tokenize_remove_stopwords():
+    text = "The index and the search are fast"
+    assert "the" in preprocess.tokenize_text(text)
+    tokens = preprocess.tokenize_text(text, remove_stopwords=True)
+    assert tokens == ["index", "search", "fast"]
+
+
+def test_tokenize_strips_apache_list_footer():
+    text = (
+        "How do I optimize the index?\n"
+        "\n"
+        "---------------------------------------------------------------------\n"
+        "To unsubscribe, e-mail: java-user-unsubscribe@lucene.apache.org\n"
+        "For additional commands, e-mail: java-user-help@lucene.apache.org\n"
+    )
+    tokens = preprocess.tokenize_text(text)
+    assert "optimize" in tokens
+    assert "unsubscribe" not in tokens
+    assert "commands" not in tokens
